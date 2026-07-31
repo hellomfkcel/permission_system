@@ -1,0 +1,158 @@
+# 外部权限管理系统 — Docker Compose 编排
+# 设计依据：docs/外部系统设计.md §6 部署架构 + docs/外部系统实施方案.md §12
+#
+# 启动方式:
+#   docker compose up -d perm-postgres perm-redis        # 基础设施
+#   docker compose up -d permission-service admin-console  # 应用服务
+#   docker compose up -d                                   # 全部服务
+#
+# 注意：Cerbos PDP 和 Keycloak 与 RAG 系统共用，不在此编排中。
+
+services:
+  # ════════════════════════════════════════════════════════
+  # 权限服务独立数据库
+  # ════════════════════════════════════════════════════════
+  perm-postgres:
+    image: postgres:16-alpine
+    container_name: perm-postgres
+    environment:
+      POSTGRES_DB: permission_db
+      POSTGRES_USER: perm_user
+      POSTGRES_PASSWORD: perm_pass
+    ports:
+      - "25433:5432"
+    volumes:
+      - perm_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U perm_user -d permission_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - perm-network
+
+  # ════════════════════════════════════════════════════════
+  # 权限事件 Redis（开发阶段可复用 RAG Redis :16379）
+  # ════════════════════════════════════════════════════════
+  perm-redis:
+    image: redis:7-alpine
+    container_name: perm-redis
+    command: redis-server --requirepass perm_redis_pwd_2026 --appendonly yes
+    ports:
+      - "16380:6379"
+    volumes:
+      - perm_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "perm_redis_pwd_2026", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - perm-network
+
+  # ════════════════════════════════════════════════════════
+  # 权限服务后端
+  # ════════════════════════════════════════════════════════
+  permission-service:
+    build: ./permission-service
+    container_name: permission-service
+    ports:
+      - "18080:8080"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://perm_user:perm_pass@perm-postgres:5432/permission_db
+      DATABASE_URL_SYNC: postgresql://perm_user:perm_pass@perm-postgres:5432/permission_db
+      CERBOS_PDP_URL: http://host.docker.internal:13592
+      REDIS_URL: redis://:perm_redis_pwd_2026@perm-redis:6379/0
+      JWT_PUBLIC_KEY_PATH: /run/secrets/jwt_public_key
+      KEYCLOAK_SERVER_URL: http://host.docker.internal:8080
+      KEYCLOAK_REALM: rag-v14
+      KEYCLOAK_CLIENT_ID: permission-service
+      KEYCLOAK_CLIENT_SECRET_FILE: /run/secrets/keycloak_client_secret
+      HOST: 0.0.0.0
+      PORT: 8080
+      LOG_LEVEL: INFO
+      # ── P1 生产加固配置 ──
+      PRODUCTION: "true"
+      CTX_TOKEN_SECRET_FILE: /run/secrets/ctx_token_secret
+      TLS_ENABLED: "true"
+      TLS_CERT_FILE: /run/secrets/tls_cert
+      TLS_KEY_FILE: /run/secrets/tls_key
+      # 服务间 API Key（生产环境通过 Docker secret 注入）
+      SERVICE_API_KEY_FILE: /run/secrets/service_api_key
+      # Keycloak admin 凭据（生产环境通过 Docker secret 注入）
+      KEYCLOAK_ADMIN_USERNAME_FILE: /run/secrets/keycloak_admin_username
+      KEYCLOAK_ADMIN_PASSWORD_FILE: /run/secrets/keycloak_admin_password
+    secrets:
+      - jwt_public_key
+      - keycloak_client_secret
+      - ctx_token_secret
+      - tls_cert
+      - tls_key
+      - service_api_key
+      - keycloak_admin_username
+      - keycloak_admin_password
+    depends_on:
+      perm-postgres:
+        condition: service_healthy
+      perm-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - perm-network
+
+  # ════════════════════════════════════════════════════════
+  # 管理台前端
+  #
+  # NEXT_PUBLIC_* 变量在构建时嵌入浏览器端代码。
+  # 浏览器无法解析 Docker 内部服务名，因此必须使用宿主机可达地址。
+  # 通过 EXTERNAL_HOST 环境变量或 .env 文件配置（默认 localhost）。
+  # ════════════════════════════════════════════════════════
+  admin-console:
+    build: ./admin-console
+    container_name: admin-console
+    ports:
+      - "3002:3000"
+    environment:
+      NEXT_PUBLIC_PERMISSION_SERVICE_URL: http://${EXTERNAL_HOST:-localhost}:18080
+      NEXT_PUBLIC_KEYCLOAK_URL: http://${EXTERNAL_HOST:-localhost}:8080
+      NEXT_PUBLIC_KEYCLOAK_REALM: rag-v14
+      NEXT_PUBLIC_KEYCLOAK_CLIENT_ID: admin-console
+    depends_on:
+      - permission-service
+    restart: unless-stopped
+    networks:
+      - perm-network
+
+secrets:
+  jwt_public_key:
+    file: /home/mfkcel/proj_rag_dev/config/jwt_public.pem
+  keycloak_client_secret:
+    file: /home/mfkcel/permission-system/permission-service/config/keycloak_client_secret
+  ctx_token_secret:
+    file: /home/mfkcel/permission-system/permission-service/config/ctx_token_secret
+  tls_cert:
+    file: /home/mfkcel/permission-system/permission-service/config/tls_cert.pem
+  tls_key:
+    file: /home/mfkcel/permission-system/permission-service/config/tls_key.pem
+  service_api_key:
+    file: /home/mfkcel/permission-system/permission-service/config/service_api_key
+  keycloak_admin_username:
+    file: /home/mfkcel/permission-system/permission-service/config/keycloak_admin_username
+  keycloak_admin_password:
+    file: /home/mfkcel/permission-system/permission-service/config/keycloak_admin_password
+
+volumes:
+  perm_pgdata:
+  perm_redis_data:
+
+networks:
+  perm-network:
+    driver: bridge

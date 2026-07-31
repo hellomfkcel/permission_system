@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+dist/
+node_modules/
+.next/
+.env.local
+*.log
+
+# Secret files (P2-3 production security)
+**/config/keycloak_client_secret
+**/config/ctx_token_secret
+*.secret
+*.pem
+
+# P2-4: Service API key and additional secret files
+**/config/service_api_key
+**/config/jwt_public_key
+**/config/jwt_private_key
+**/config/tls_key
+**/config/tls_cert
+**/config/keycloak_admin_username
+**/config/keycloak_admin_password
