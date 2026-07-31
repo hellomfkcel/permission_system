@@ -1,0 +1,570 @@
+"""管理台 API — ACL 权限授予/回收/查询。
+
+设计依据：docs/外部系统设计.md §2.4.4 管理台专用 API。
+"""
+
+import csv
+import io
+import uuid
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from pydantic import BaseModel, Field
+from sqlalchemy import select, or_
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import get_db
+from models.acl import ACLEntry
+from models.role_binding import RoleBinding
+from services.event_publisher import get_event_publisher
+from api.auth_routes import get_current_admin
+from schemas.responses import Principal
+from app.role_actions_config import (
+    ROLE_ACTIONS_MAP,
+    VALID_ACTIONS,
+    VALID_RESOURCE_TYPES,
+)
+
+router = APIRouter(prefix="/api/v1/acl", tags=["admin-acl"])
+
+
+# ── 请求/响应模型 ──
+
+
+class GrantRequest(BaseModel):
+    tenant_id: str = Field(...)
+    principal: str = Field(..., description="user:xxx | group:xxx | role:xxx")
+    resource_type: str = Field(..., description="kb | document")
+    resource_id: str = Field(...)
+    action: str = Field(..., description="kb:read | doc:view | doc:download | ...")
+    granted_by: str = Field(...)
+    expires_at: str | None = Field(None, description="过期时间 ISO 8601")
+
+
+class GrantResponse(BaseModel):
+    grant_id: str
+    version: int
+
+
+class RevokeRequest(BaseModel):
+    principal: str
+    resource_type: str
+    resource_id: str
+    action: str
+
+
+class ACLEntryOut(BaseModel):
+    id: str
+    tenant_id: str
+    principal: str
+    resource_type: str
+    resource_id: str
+    action: str
+    granted_by: str
+    granted_at: str
+    expires_at: str | None
+    revoked: bool
+
+
+# ── 端点 ──
+
+
+@router.post("/grant", response_model=GrantResponse)
+async def grant_acl(
+    body: GrantRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
+) -> GrantResponse:
+    """授予权限（需要管理员认证）。
+
+    流程：
+    1. 验证管理员身份（JWT Bearer token）
+    2. 检查是否已有相同 active 记录
+    3. INSERT acl_entries（granted_by 使用管理员身份）
+    4. 递增 global_permission_version
+    5. 发布 VisibilityChanged 事件
+    """
+    # 检查重复
+    stmt = select(ACLEntry).where(
+        ACLEntry.principal == body.principal,
+        ACLEntry.resource_type == body.resource_type,
+        ACLEntry.resource_id == body.resource_id,
+        ACLEntry.action == body.action,
+        ACLEntry.revoked == False,  # noqa: E712
+    )
+    result = await db.execute(stmt)
+    existing = result.scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=409, detail="grant already exists")
+
+    # 解析过期时间
+    expires_at = None
+    if body.expires_at:
+        expires_at = datetime.fromisoformat(body.expires_at)
+
+    # INSERT — granted_by 使用已验证的管理员身份
+    new_id = uuid.uuid4()
+    entry = ACLEntry(
+        id=new_id,
+        tenant_id=body.tenant_id,
+        principal=body.principal,
+        resource_type=body.resource_type,
+        resource_id=body.resource_id,
+        action=body.action,
+        granted_by=f"user:{admin.user_id}",  # 从 JWT 提取，忽略请求中的 granted_by
+        expires_at=expires_at,
+    )
+    db.add(entry)
+
+    # ★ Outbox 模式（设计依据 §3.2）：
+    # 在同一事务内写 ACL + permission_changes，原子提交
+    publisher = get_event_publisher()
+    kb_id = body.resource_id if body.resource_type == "kb" else None
+    version, change_id = await publisher.write_change_log(
+        db,
+        tenant_id=body.tenant_id,
+        resource_type=body.resource_type,
+        resource_id=body.resource_id,
+        kb_id=kb_id,
+        change_detail={
+            "action": "acl_granted",
+            "principal": body.principal,
+            "permission": body.action,
+        },
+    )
+    await db.commit()  # ACL + change_log 原子提交
+
+    # 事务提交后异步发布 Redis（失败不影响已提交数据）
+    await publisher.publish_event(
+        change_id, version, body.tenant_id,
+        body.resource_type, body.resource_id,
+        kb_id=kb_id,
+        change_detail={
+            "action": "acl_granted",
+            "principal": body.principal,
+            "permission": body.action,
+        },
+    )
+
+    return GrantResponse(grant_id=str(new_id), version=version)
+
+
+@router.post("/revoke")
+async def revoke_acl(
+    body: RevokeRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
+) -> dict:
+    """回收权限（需要管理员认证）。"""
+    stmt = select(ACLEntry).where(
+        ACLEntry.principal == body.principal,
+        ACLEntry.resource_type == body.resource_type,
+        ACLEntry.resource_id == body.resource_id,
+        ACLEntry.action == body.action,
+        ACLEntry.revoked == False,  # noqa: E712
+    )
+    result = await db.execute(stmt)
+    entry = result.scalar_one_or_none()
+
+    if not entry:
+        raise HTTPException(status_code=404, detail="grant not found")
+
+    entry.revoked = True
+    entry.revoked_at = datetime.now(timezone.utc)
+
+    # ★ Outbox 模式：同一事务内写 revoke + permission_changes
+    publisher = get_event_publisher()
+    version, change_id = await publisher.write_change_log(
+        db,
+        tenant_id=entry.tenant_id,
+        resource_type=body.resource_type,
+        resource_id=body.resource_id,
+        change_detail={
+            "action": "acl_revoked",
+            "principal": body.principal,
+            "permission": body.action,
+        },
+    )
+    await db.commit()
+
+    await publisher.publish_event(
+        change_id, version, entry.tenant_id,
+        body.resource_type, body.resource_id,
+        change_detail={
+            "action": "acl_revoked",
+            "principal": body.principal,
+            "permission": body.action,
+        },
+    )
+
+    return {"grant_id": str(entry.id), "result": "revoked", "version": version}
+
+
+@router.get("", response_model=list[ACLEntryOut])
+async def list_acl(
+    resource_type: str | None = Query(None),
+    resource_id: str | None = Query(None),
+    principal: str | None = Query(None),
+    revoked: bool | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+) -> list[ACLEntryOut]:
+    """查询 ACL 列表。"""
+    conditions = []
+    if resource_type:
+        conditions.append(ACLEntry.resource_type == resource_type)
+    if resource_id:
+        conditions.append(ACLEntry.resource_id == resource_id)
+    if principal:
+        conditions.append(ACLEntry.principal == principal)
+    if revoked is not None:
+        conditions.append(ACLEntry.revoked == revoked)
+
+    stmt = select(ACLEntry).where(*conditions).order_by(ACLEntry.granted_at.desc())
+    result = await db.execute(stmt)
+    entries = result.scalars().all()
+
+    return [
+        ACLEntryOut(
+            id=str(e.id),
+            tenant_id=e.tenant_id,
+            principal=e.principal,
+            resource_type=e.resource_type,
+            resource_id=e.resource_id,
+            action=e.action,
+            granted_by=e.granted_by,
+            granted_at=e.granted_at.isoformat() if e.granted_at else "",
+            expires_at=e.expires_at.isoformat() if e.expires_at else None,
+            revoked=e.revoked,
+        )
+        for e in entries
+    ]
+
+
+# ── 有效权限计算 ──
+
+
+class EffectivePermission(BaseModel):
+    principal: str
+    resource_type: str
+    resource_id: str
+    effective_actions: list[str] = Field(default_factory=list)
+    source: str = Field("", description="acl | role_binding | combined")
+
+
+@router.get("/effective", response_model=list[EffectivePermission])
+async def get_effective_permissions(
+    principal: str | None = Query(None, description="主体: user:xxx | group:xxx"),
+    resource_type: str | None = Query(None),
+    resource_id: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+) -> list[EffectivePermission]:
+    """计算某主体对资源的有效权限（合并 ACL + 角色绑定 + 封禁）。
+
+    设计依据：docs/外部系统设计.md §2.4.4 ACL 管理 — 有效权限计算。
+    """
+    conditions = [ACLEntry.revoked == False]  # noqa: E712
+    if principal:
+        conditions.append(ACLEntry.principal == principal)
+    if resource_type:
+        conditions.append(ACLEntry.resource_type == resource_type)
+    if resource_id:
+        conditions.append(ACLEntry.resource_id == resource_id)
+
+    stmt = select(ACLEntry).where(*conditions).order_by(ACLEntry.granted_at.desc())
+    result = await db.execute(stmt)
+    entries = result.scalars().all()
+
+    # 按 (principal, resource_type, resource_id) 聚合
+    from collections import defaultdict
+    grouped: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+    for e in entries:
+        key = (e.principal, e.resource_type, e.resource_id)
+        if e.action not in grouped[key]:
+            grouped[key].append(e.action)
+
+    output: list[EffectivePermission] = []
+    for (p, rt, rid), actions in grouped.items():
+        # 查询角色绑定补充
+        role_stmt = select(RoleBinding).where(
+            RoleBinding.principal == p,
+            RoleBinding.revoked == False,  # noqa: E712
+        )
+        role_result = await db.execute(role_stmt)
+        role_bindings = role_result.scalars().all()
+
+        source = "acl"
+        for rb in role_bindings:
+            source = "combined" if source == "acl" else source
+            implicit = ROLE_ACTIONS_MAP.get(rb.role, [])
+            for a in implicit:
+                if a not in actions:
+                    actions.append(a)
+
+        output.append(EffectivePermission(
+            principal=p,
+            resource_type=rt,
+            resource_id=rid,
+            effective_actions=sorted(actions),
+            source=source,
+        ))
+
+    return sorted(output, key=lambda x: (x.principal, x.resource_type, x.resource_id))
+
+
+# ── 批量授予 ──
+
+
+class BatchGrantRequest(BaseModel):
+    grants: list[GrantRequest] = Field(..., max_length=100, description="批量授予列表，≤100 条")
+
+
+class BatchGrantResult(BaseModel):
+    success: int = 0
+    failed: int = 0
+    results: list[dict] = Field(default_factory=list)
+
+
+@router.post("/batch-grant", response_model=BatchGrantResult)
+async def batch_grant_acl(
+    body: BatchGrantRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
+) -> BatchGrantResult:
+    """批量授予权限（需要管理员认证）。
+
+    逐条独立处理，单条失败不影响其余。
+    最大 100 条/次。
+    """
+    results: list[dict] = []
+    success = 0
+    failed = 0
+
+    for grant in body.grants:
+        try:
+            # 检查重复
+            stmt = select(ACLEntry).where(
+                ACLEntry.principal == grant.principal,
+                ACLEntry.resource_type == grant.resource_type,
+                ACLEntry.resource_id == grant.resource_id,
+                ACLEntry.action == grant.action,
+                ACLEntry.revoked == False,  # noqa: E712
+            )
+            result = await db.execute(stmt)
+            existing = result.scalar_one_or_none()
+            if existing:
+                results.append({"principal": grant.principal, "action": grant.action, "status": "skipped", "reason": "duplicate"})
+                success += 1
+                continue
+
+            expires_at = datetime.fromisoformat(grant.expires_at) if grant.expires_at else None
+            new_id = uuid.uuid4()
+            entry = ACLEntry(
+                id=new_id,
+                tenant_id=grant.tenant_id,
+                principal=grant.principal,
+                resource_type=grant.resource_type,
+                resource_id=grant.resource_id,
+                action=grant.action,
+                granted_by=f"user:{admin.user_id}",
+                expires_at=expires_at,
+            )
+            db.add(entry)
+            results.append({"principal": grant.principal, "action": grant.action, "status": "granted"})
+            success += 1
+        except Exception as e:
+            results.append({"principal": grant.principal, "action": grant.action, "status": "failed", "reason": str(e)[:100]})
+            failed += 1
+
+    # ★ Outbox 模式：同一事务内写 ACL + permission_changes
+    publisher = get_event_publisher()
+    version = 0
+    change_id = None
+    if success > 0:
+        version, change_id = await publisher.write_change_log(
+            db,
+            tenant_id=body.grants[0].tenant_id,
+            resource_type=body.grants[0].resource_type,
+            resource_id=body.grants[0].resource_id,
+            event_type="ACL_BATCH_GRANTED",
+            change_detail={"count": success, "failed": failed},
+        )
+    await db.commit()
+
+    # 事务提交后异步发布 Redis
+    if success > 0 and change_id:
+        await publisher.publish_event(
+            change_id, version, body.grants[0].tenant_id,
+            body.grants[0].resource_type, body.grants[0].resource_id,
+            event_type="ACL_BATCH_GRANTED",
+            change_detail={"count": success, "failed": failed},
+        )
+
+    return BatchGrantResult(success=success, failed=failed, results=results)
+
+
+# ══════════════════════════════════════════════════════════════
+# P2-2: CSV 批量导入 ACL
+# ══════════════════════════════════════════════════════════════
+
+
+class CSVImportResult(BaseModel):
+    """CSV 导入结果。"""
+    total_rows: int = 0
+    success: int = 0
+    skipped: int = 0
+    failed: int = 0
+    errors: list[dict] = Field(default_factory=list)
+
+
+# 有效的 action 值（设计依据：app/role_actions_config.py）
+_VALID_ACTIONS = VALID_ACTIONS
+_VALID_RESOURCE_TYPES = VALID_RESOURCE_TYPES
+
+
+@router.post("/import-csv", response_model=CSVImportResult)
+async def import_acl_csv(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
+) -> CSVImportResult:
+    """CSV 批量导入 ACL 权限。
+
+    CSV 格式（header 行必须）：
+        principal,resource_type,resource_id,action,expires_at
+
+    约束：
+    - 最大 1000 行/次
+    - 逐行校验（格式、action 合法值、resource_type 合法值）
+    - 单行失败不影响其余
+    - 返回详细错误报告
+
+    设计依据：docs/外部系统设计.md §3.3 /permissions 页面 — 批量操作
+              + docs/权限管理系统架构设计.md §2.1 动词目录。
+    """
+    # 读取文件内容
+    try:
+        content = await file.read()
+        text = content.decode("utf-8-sig")  # 支持 BOM
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=422, detail="CSV file must be UTF-8 encoded")
+
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise HTTPException(status_code=422, detail="CSV file is empty or missing header row")
+
+    # 校验必要列
+    required_cols = {"principal", "resource_type", "resource_id", "action"}
+    header_set = {h.strip().lower() for h in reader.fieldnames}
+    missing = required_cols - header_set
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Missing required columns: {', '.join(sorted(missing))}. "
+                   f"Required: principal, resource_type, resource_id, action. Optional: expires_at",
+        )
+
+    rows = list(reader)
+    if len(rows) > 1000:
+        raise HTTPException(status_code=422, detail=f"Max 1000 rows per import, got {len(rows)}")
+
+    total_rows = len(rows)
+    success = 0
+    skipped = 0
+    failed = 0
+    errors: list[dict] = []
+
+    for i, row in enumerate(rows):
+        row_num = i + 2  # CSV 行号（header=1, data starts at 2）
+        principal = (row.get("principal") or "").strip()
+        resource_type = (row.get("resource_type") or "").strip().lower()
+        resource_id = (row.get("resource_id") or "").strip()
+        action = (row.get("action") or "").strip()
+        expires_at_raw = (row.get("expires_at") or "").strip() or None
+
+        # 字段校验
+        row_errors = []
+        if not principal:
+            row_errors.append("principal is required")
+        if resource_type not in _VALID_RESOURCE_TYPES:
+            row_errors.append(f"resource_type '{resource_type}' is invalid (must be: kb, document)")
+        if not resource_id:
+            row_errors.append("resource_id is required")
+        if action not in _VALID_ACTIONS:
+            row_errors.append(f"action '{action}' is invalid (must be one of: {', '.join(sorted(_VALID_ACTIONS))})")
+
+        # 过期时间解析
+        expires_at = None
+        if expires_at_raw:
+            try:
+                expires_at = datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00"))
+                if expires_at < datetime.now(timezone.utc):
+                    row_errors.append(f"expires_at is in the past: {expires_at_raw}")
+            except ValueError:
+                row_errors.append(f"Invalid expires_at format: {expires_at_raw} (expected ISO 8601)")
+
+        if row_errors:
+            failed += 1
+            errors.append({"row": row_num, "principal": principal, "errors": row_errors})
+            continue
+
+        # 检查重复
+        try:
+            stmt = select(ACLEntry).where(
+                ACLEntry.principal == principal,
+                ACLEntry.resource_type == resource_type,
+                ACLEntry.resource_id == resource_id,
+                ACLEntry.action == action,
+                ACLEntry.revoked == False,  # noqa: E712
+            )
+            result = await db.execute(stmt)
+            if result.scalar_one_or_none():
+                skipped += 1
+                continue
+
+            # 创建 ACL 条目
+            new_id = uuid.uuid4()
+            entry = ACLEntry(
+                id=new_id,
+                tenant_id=admin.tenant_id or "tenant-dev",
+                principal=principal,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                action=action,
+                granted_by=f"user:{admin.user_id}",
+                expires_at=expires_at,
+            )
+            db.add(entry)
+            success += 1
+        except Exception as e:
+            failed += 1
+            errors.append({"row": row_num, "principal": principal, "errors": [str(e)[:200]]})
+
+    # Outbox 模式：同一事务内写事件日志
+    publisher = get_event_publisher()
+    if success > 0:
+        version, change_id = await publisher.write_change_log(
+            db,
+            tenant_id=admin.tenant_id or "tenant-dev",
+            resource_type="acl",
+            resource_id="csv-import",
+            event_type="ACL_BATCH_GRANTED",
+            change_detail={"import_success": success, "import_skipped": skipped, "import_failed": failed},
+        )
+    await db.commit()
+
+    # 事务提交后异步发布 Redis
+    if success > 0:
+        await publisher.publish_event(
+            change_id, version, admin.tenant_id or "tenant-dev",
+            "acl", "csv-import",
+            event_type="ACL_BATCH_GRANTED",
+            change_detail={"import_success": success},
+        )
+
+    return CSVImportResult(
+        total_rows=total_rows,
+        success=success,
+        skipped=skipped,
+        failed=failed,
+        errors=errors[:50],  # 最多返回 50 条错误
+    )
