@@ -13,7 +13,11 @@ import api from "@/lib/api";
 
 interface UserInfo {
   user_id: string;
+  username: string;
+  email: string;
+  display_name: string;
   tenant_id: string;
+  tenants: string[];
   roles: string[];
   groups: string[];
   principals: string[];
@@ -111,7 +115,7 @@ export default function UserDetailPage() {
           👥 用户与组
         </Link>
         <span>/</span>
-        <span className="text-gray-800 font-medium">👤 {userId}</span>
+        <span className="text-gray-800 font-medium">👤 {user?.display_name || user?.username || userId.slice(0, 8) + "..."}</span>
       </div>
 
       {/* 用户概览卡片 */}
@@ -120,15 +124,27 @@ export default function UserDetailPage() {
           <div>
             <h1 className="text-2xl font-bold flex items-center gap-2">
               <span className="w-10 h-10 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center text-lg">
-                {userId.charAt(0).toUpperCase()}
+                {(user?.display_name || userId).charAt(0).toUpperCase()}
               </span>
-              {userId}
+              {user?.display_name || user?.username || userId.slice(0, 8) + "..."}
             </h1>
             {user && (
               <div className="mt-3 space-y-1 text-sm text-gray-600">
                 <div>
+                  <span className="font-medium">用户名：</span>
+                  {user.username || userId}
+                </div>
+                <div>
+                  <span className="font-medium">邮箱：</span>
+                  {user.email || "-"}
+                </div>
+                <div>
                   <span className="font-medium">租户：</span>
-                  {user.tenant_id}
+                  {user.tenants.length > 0
+                    ? user.tenants.map((t) => (
+                        <span key={t} className="bg-purple-100 text-purple-800 px-2 py-0.5 rounded text-xs mr-1">{t}</span>
+                      ))
+                    : (user.tenant_id || "-")}
                 </div>
                 <div>
                   <span className="font-medium">角色：</span>

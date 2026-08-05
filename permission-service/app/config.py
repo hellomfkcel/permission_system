@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     jwt_private_key_path: str = "./config/jwt_private.pem"
     jwt_algorithm: str = "RS256"
     jwt_expire_seconds: int = 3600  # dev-login token 有效期
+    # ── 开发模式登录密码（安全底线：开发环境也不应无密码登录）──
+    # 生产环境务必通过环境变量覆盖默认值。
+    # 当 PRODUCTION=true 时，dev-login 端点完全禁用（返回 501）。
+    dev_login_password: str = "dev_password_2026"
     # JWT Issuer 白名单（逗号分隔）。开发模式不校验（留空），
     # 生产模式配置为已知 issuer 的列表，如 "rag-v14,permission-service"。
     jwt_allowed_issuers: str = ""

@@ -262,6 +262,8 @@ from api.restriction_routes import router as restriction_router
 from api.audit_routes import router as audit_router
 from api.auth_routes import router as auth_router
 from api.resource_routes import router as resource_admin_router
+from api.tenant_routes import router as tenant_router
+from api.role_definitions_routes import router as role_def_router
 
 app.include_router(decision_router)
 app.include_router(context_router)
@@ -273,6 +275,8 @@ app.include_router(restriction_router)
 app.include_router(audit_router)
 app.include_router(auth_router)
 app.include_router(resource_admin_router)
+app.include_router(tenant_router)
+app.include_router(role_def_router)
 
 
 if __name__ == "__main__":

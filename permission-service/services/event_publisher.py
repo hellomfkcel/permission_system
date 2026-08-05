@@ -248,6 +248,44 @@ class EventPublisher:
         )
         return version
 
+    async def publish_tenant_created(
+        self,
+        db,  # AsyncSession — 由调用方传入
+        tenant_id: str,
+        tenant_name: str,
+        created_by: str,
+    ) -> None:
+        """发布 TenantCreated 事件。
+
+        在创建租户的事务内写入 change_log。
+        调用方负责 await db.commit()。
+        """
+        import uuid as _uuid
+        from sqlalchemy import text as _text
+        from models.change_log import PermissionChange
+
+        # Increment global version and insert change log in same transaction
+        result = await db.execute(
+            _text("SELECT nextval('global_permission_version')")
+        )
+        version = result.scalar()
+
+        change_entry = PermissionChange(
+            id=_uuid.uuid4(),
+            event_type="TenantCreated",
+            resource_type="tenant",
+            resource_id=tenant_id,
+            tenant_id=tenant_id,
+            change_detail={
+                "action": "tenant_created",
+                "tenant_name": tenant_name,
+                "created_by": created_by,
+            },
+            version=version,
+        )
+        db.add(change_entry)
+        # Note: caller must await db.commit() to persist
+
     async def close(self) -> None:
         if self._redis is not None:
             await self._redis.aclose()

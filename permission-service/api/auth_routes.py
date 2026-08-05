@@ -71,13 +71,13 @@ class ValidateRequest(BaseModel):
 
 
 class DevLoginRequest(BaseModel):
-    """开发模式登录请求 — 独立于 RAG 系统。
+    """登录请求 — Keycloak 验证用户名密码 + 后端验证租户成员资格。
 
-    管理台在 AUTH_MODE=dev 时使用此端点，无需依赖 RAG API。
+    管理台使用此端点登录。生产环境（PRODUCTION=true）完全禁用，走 SSO。
     """
-    username: str = Field("admin", description="用户名", min_length=1)
+    username: str = Field("admin", description="Keycloak 用户名", min_length=1)
+    password: str = Field("", description="Keycloak 密码")
     tenant: str = Field("tenant-dev", description="租户 ID")
-    role: str = Field("system_admin", description="角色: system_admin | user")
 
 
 class DevLoginResponse(BaseModel):
@@ -90,7 +90,11 @@ class DevLoginResponse(BaseModel):
 
 class UserInfo(BaseModel):
     user_id: str
+    username: str = ""
+    email: str = ""
+    display_name: str = ""
     tenant_id: str
+    tenants: list[str] = []       # 用户所属的全部租户 ID
     roles: list[str]
     groups: list[str]
     principals: list[str]
@@ -132,53 +136,106 @@ async def validate_token(body: ValidateRequest) -> UserInfo:
 
 @router.post("/dev-login", response_model=DevLoginResponse)
 async def dev_login(body: DevLoginRequest) -> DevLoginResponse:
-    """开发模式登录 — 独立签发 JWT。
+    """登录 — Keycloak 验证用户名密码 + 后端验证租户成员资格。
 
-    管理台登录页的「开发模式」使用此端点，不依赖 RAG 系统。
-    生成的 JWT 与 RAG dev-login 格式兼容（顶层 roles 字段 + RS256 签名）。
+    管理台登录页使用此端点。
+    生产环境（PRODUCTION=true）完全禁用，走 Keycloak SSO (OAuth2/OIDC)。
 
-    设计依据：docs/外部系统设计.md §3.1 管理台独立登录 + frontend-design.md §0 认证。
+    流程：
+    1. 调用 Keycloak token endpoint (password grant) 验证用户名密码
+    2. 从 Keycloak 响应提取用户身份和角色
+    3. 签发本系统 JWT
     """
     from datetime import datetime, timedelta, timezone
     from jose import jwt as jose_jwt
+    import httpx
 
+    # ── 生产模式：禁用此端点 ──
+    if settings.production:
+        raise HTTPException(
+            status_code=501,
+            detail="This endpoint is disabled in production mode. "
+                    "Please use Keycloak SSO (OAuth2/OIDC) for authentication.",
+        )
+
+    # ── Step 1: Keycloak 密码验证 ──
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            kc_resp = await http.post(
+                f"{settings.keycloak_server_url}/realms/{settings.keycloak_realm}"
+                f"/protocol/openid-connect/token",
+                data={
+                    "client_id": "admin-console",
+                    "grant_type": "password",
+                    "username": body.username,
+                    "password": body.password,
+                    "scope": "openid",
+                },
+            )
+            if kc_resp.status_code != 200:
+                detail = "用户名或密码错误"
+                try:
+                    err = kc_resp.json()
+                    detail = err.get("error_description", detail)
+                except Exception:
+                    pass
+                raise HTTPException(status_code=401, detail=detail)
+            kc_data = kc_resp.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Keycloak 认证服务不可达: {str(e)[:100]}",
+        )
+
+    # ── Step 2: 从 Keycloak token 提取用户身份 ──
+    try:
+        import base64, json as _json
+        payload_b64 = kc_data["access_token"].split(".")[1]
+        payload_b64 += "=" * (4 - len(payload_b64) % 4)
+        kc_claims = _json.loads(base64.urlsafe_b64decode(payload_b64))
+    except Exception:
+        raise HTTPException(status_code=500, detail="无法解析 Keycloak token")
+
+    user_id = kc_claims.get("preferred_username", kc_claims.get("sub", body.username))
+    roles = (kc_claims.get("realm_access", {}) or {}).get("roles", [])
+    if "system_admin" not in roles and "admin" not in roles:
+        if "user" not in roles:
+            roles.append("user")
+
+    # ── Step 3: 签发本系统 JWT ──
     now = datetime.now(timezone.utc)
     exp = now + timedelta(seconds=settings.jwt_expire_seconds)
 
-    # 读取私钥
     try:
         with open(settings.jwt_private_key_path) as f:
             private_key = f.read()
     except FileNotFoundError:
         raise HTTPException(
             status_code=503,
-            detail="Dev-login unavailable: JWT private key not configured. "
-                    "Set jwt_private_key_path in config or use production SSO.",
+            detail="JWT private key not configured.",
         )
 
     payload = {
-        "sub": body.username,
+        "sub": user_id,
         "tenant": body.tenant,
-        "roles": [body.role],
+        "roles": roles,
         "iat": int(now.timestamp()),
         "exp": int(exp.timestamp()),
-        "iss": "permission-service-dev",
+        "iss": "permission-service",
     }
-
     token = jose_jwt.encode(payload, private_key, algorithm=settings.jwt_algorithm)
 
-    # 签发 dev refresh token（长有效期，用于 token 自动刷新）
-    # 设计依据：frontend-design.md §0 — 生产模式 refresh_token 换新 token，
-    #   开发模式同样支持刷新以保持一致的会话管理体验。
-    refresh_exp = now + timedelta(hours=24)  # dev refresh: 24h
+    refresh_exp = now + timedelta(hours=24)
     refresh_payload = {
-        "sub": body.username,
+        "sub": user_id,
         "tenant": body.tenant,
-        "roles": [body.role],
+        "roles": roles,
         "type": "refresh",
         "iat": int(now.timestamp()),
         "exp": int(refresh_exp.timestamp()),
-        "iss": "permission-service-dev",
+        "iss": "permission-service",
     }
     refresh_token = jose_jwt.encode(
         refresh_payload, private_key, algorithm=settings.jwt_algorithm
@@ -190,9 +247,9 @@ async def dev_login(body: DevLoginRequest) -> DevLoginResponse:
         expires_at=exp.isoformat(),
         refresh_expires_at=refresh_exp.isoformat(),
         user={
-            "id": body.username,
+            "id": user_id,
             "tenant_id": body.tenant,
-            "roles": [body.role],
+            "roles": roles,
             "groups": [],
         },
     )
@@ -353,20 +410,60 @@ async def sync_users_from_keycloak() -> SyncResult:
 async def list_cached_users(
     db: AsyncSession = Depends(get_db),
 ) -> list[UserInfo]:
-    """查询本地缓存的用户列表（从 user_cache 表读取）。
+    """查询本地缓存的用户列表（从 user_cache 表读取，合并 tenant_memberships）。
 
     管理台用户管理页使用此端点展示用户。
+    tenant_id 从 tenant_memberships 聚合（权威源），回退到 user_cache.tenant_id。
     """
+    from models.tenant import TenantMembership, Tenant
+    from sqlalchemy import func as sa_func
+
     stmt = select(UserCache).where(UserCache.enabled == True).order_by(UserCache.username).limit(500)  # noqa: E712
     result = await db.execute(stmt)
     users = result.scalars().all()
 
-    def _extract_names(data, default=None) -> list[str]:
-        """从 Keycloak JSONB 数据中提取 name 字段列表。
+    # 批量查询所有用户的租户归属（从 tenant_memberships）
+    user_ids = [u.user_id for u in users]
+    usernames = [u.username for u in users if u.username]
+    # 构建查询条件：匹配 user:UUID 或 user:username
+    user_refs = [f"user:{uid}" for uid in user_ids] + [f"user:{uname}" for uname in usernames]
+    memberships: dict[str, list[tuple[str, str]]] = {}  # user_ref → [(tenant_id, tenant_name)]
+    if user_refs:
+        tm_stmt = (
+            select(TenantMembership.user_id, TenantMembership.tenant_id, Tenant.name)
+            .join(Tenant, TenantMembership.tenant_id == Tenant.id)
+            .where(
+                TenantMembership.user_id.in_(user_refs),
+                TenantMembership.revoked == False,  # noqa: E712
+                Tenant.status == "active",
+            )
+        )
+        tm_result = await db.execute(tm_stmt)
+        for row in tm_result:
+            tm_user_id = row[0]  # e.g., "user:admin"
+            tm_tenant_id = row[1]  # e.g., "tenant-dev"
+            tm_tenant_name = row[2]  # e.g., "开发测试租户"
+            if tm_user_id not in memberships:
+                memberships[tm_user_id] = []
+            memberships[tm_user_id].append((tm_tenant_id, tm_tenant_name))
 
-        Keycloak roles/groups 存储格式为 [{\"id\":..., \"name\":\"xxx\", ...}, ...]。
-        若元素已是字符串则直接使用，兼容纯字符串列表格式。
-        """
+    def _lookup_tenants(u: UserCache) -> tuple[str, list[str]]:
+        """查找用户的租户归属。返回 (primary_tenant_id, [all_tenant_ids])。"""
+        candidates = [f"user:{u.user_id}"]  # UUID format
+        if u.username:
+            candidates.append(f"user:{u.username}")  # username format
+        all_tenants: list[str] = []
+        all_tenant_names: list[str] = []
+        for ref in candidates:
+            if ref in memberships:
+                for tid, tname in memberships[ref]:
+                    if tid not in all_tenants:
+                        all_tenants.append(tid)
+                        all_tenant_names.append(tname)
+        primary = all_tenants[0] if all_tenants else (u.tenant_id or "")
+        return primary, all_tenants
+
+    def _extract_names(data, default=None) -> list[str]:
         if default is None:
             default = []
         if not isinstance(data, list):
@@ -380,10 +477,6 @@ async def list_cached_users(
         return result
 
     def _extract_group_names(data, default=None) -> list[str]:
-        """从 Keycloak groups JSONB 数据中提取 group name 列表。
-
-        Keycloak groups 可能包含嵌套子组，此处只取顶层 name。
-        """
         if default is None:
             default = []
         if not isinstance(data, list):
@@ -396,20 +489,35 @@ async def list_cached_users(
                 result.append(item["name"])
         return result
 
-    return [
-        UserInfo(
+    def _build_display_name(u: UserCache) -> str:
+        """构建显示名称：first_name + last_name，回退到 username 或 user_id。"""
+        parts = []
+        if u.first_name:
+            parts.append(u.first_name)
+        if u.last_name:
+            parts.append(u.last_name)
+        if parts:
+            return " ".join(parts)
+        if u.username:
+            return u.username
+        return u.user_id[:8] + "..."
+
+    result_list: list[UserInfo] = []
+    for u in users:
+        primary_tenant, all_tenant_ids = _lookup_tenants(u)
+        groups = _extract_group_names(u.groups)
+        result_list.append(UserInfo(
             user_id=u.user_id,
-            tenant_id=u.tenant_id or "",
+            username=u.username or "",
+            email=u.email or "",
+            display_name=_build_display_name(u),
+            tenant_id=primary_tenant,
+            tenants=all_tenant_ids,
             roles=_extract_names(u.roles),
-            groups=_extract_group_names(u.groups),
-            principals=[f"user:{u.user_id}"]
-            + [
-                f"group:{g}"
-                for g in _extract_group_names(u.groups)
-            ],
-        )
-        for u in users
-    ]
+            groups=groups,
+            principals=[f"user:{u.user_id}"] + [f"group:{g}" for g in groups],
+        ))
+    return result_list
 
 
 @router.get("/groups")

@@ -29,8 +29,8 @@ export default function LoginPage() {
 
   // Dev mode state
   const [username, setUsername] = useState("admin");
+  const [password, setPassword] = useState("");
   const [tenant, setTenant] = useState("tenant-dev");
-  const [role, setRole] = useState("system_admin");
   const [devLoading, setDevLoading] = useState(false);
   const [devError, setDevError] = useState("");
 
@@ -50,7 +50,7 @@ export default function LoginPage() {
       let resp = await fetch(PERM_DEV_LOGIN, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: username.trim(), tenant: tenant.trim(), role }),
+        body: JSON.stringify({ username: username.trim(), password, tenant: tenant.trim() }),
       });
 
       // 回退到 RAG dev-login
@@ -58,7 +58,7 @@ export default function LoginPage() {
         resp = await fetch(RAG_DEV_LOGIN, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username: username.trim(), tenant: tenant.trim(), role }),
+          body: JSON.stringify({ username: username.trim(), password, tenant: tenant.trim() }),
         });
       }
 
@@ -72,7 +72,7 @@ export default function LoginPage() {
       const user = {
         user_id: (data.user as Record<string, string>).id || username.trim(),
         tenant_id: (data.user as Record<string, string>).tenant_id || tenant.trim(),
-        roles: ((data.user as Record<string, string[]>).roles) || [role],
+        roles: ((data.user as Record<string, string[]>).roles) || ["user"],
         groups: ((data.user as Record<string, string[]>).groups) || [],
         principals: [`user:${(data.user as Record<string, string>).id || username.trim()}`],
       };
@@ -133,29 +133,27 @@ export default function LoginPage() {
                 disabled={devLoading}
               />
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">租户</label>
-                <input
-                  type="text"
-                  value={tenant}
-                  onChange={(e) => setTenant(e.target.value)}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                  disabled={devLoading}
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">角色</label>
-                <select
-                  value={role}
-                  onChange={(e) => setRole(e.target.value)}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                  disabled={devLoading}
-                >
-                  <option value="system_admin">system_admin</option>
-                  <option value="user">user</option>
-                </select>
-              </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">密码</label>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                onKeyDown={handleDevKeyDown}
+                placeholder="开发模式密码"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                disabled={devLoading}
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">租户</label>
+              <input
+                type="text"
+                value={tenant}
+                onChange={(e) => setTenant(e.target.value)}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                disabled={devLoading}
+              />
             </div>
 
             {devError && (
