@@ -21,6 +21,8 @@ import {
   Settings,
   LogOut,
   ExternalLink,
+  Building2,
+  FileCode,
 } from "lucide-react";
 
 /** RAG 系统入口 URL — 从环境变量读取，用于"返回 RAG 系统"跳转。
@@ -33,11 +35,13 @@ const RAG_SYSTEM_URL =
 
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/tenants", label: "租户管理", icon: Building2 },
   { href: "/resources", label: "资源管理", icon: FolderOpen },
   { href: "/users-groups", label: "用户与组", icon: Users },
+  { href: "/roles", label: "角色管理", icon: Shield },
   { href: "/permissions", label: "权限管理", icon: Key },
   { href: "/restrictions", label: "封禁管理", icon: Ban },
-  { href: "/policies", label: "策略管理", icon: Shield },
+  { href: "/policies", label: "策略管理", icon: FileCode },
   { href: "/audit", label: "审计日志", icon: History },
   { href: "/playground", label: "策略模拟", icon: FlaskConical },
   { href: "/settings", label: "系统设置", icon: Settings },

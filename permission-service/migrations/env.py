@@ -24,6 +24,8 @@ from models import (  # noqa: F401 — 确保所有模型表被导入
     RoleBinding,
     Restriction,
     PermissionChange,
+    Tenant,
+    TenantMembership,
 )
 
 target_metadata = Base.metadata

@@ -7,7 +7,11 @@ import api from "@/lib/api";
 
 interface UserInfo {
   user_id: string;
+  username: string;
+  email: string;
+  display_name: string;
   tenant_id: string;
+  tenants: string[];
   roles: string[];
   groups: string[];
   principals: string[];
@@ -130,7 +134,8 @@ export default function UsersGroupsPage() {
             <table className="w-full">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="text-left px-4 py-3 text-sm font-medium text-gray-600">用户 ID</th>
+                  <th className="text-left px-4 py-3 text-sm font-medium text-gray-600">用户</th>
+                  <th className="text-left px-4 py-3 text-sm font-medium text-gray-600">邮箱</th>
                   <th className="text-left px-4 py-3 text-sm font-medium text-gray-600">租户</th>
                   <th className="text-left px-4 py-3 text-sm font-medium text-gray-600">角色</th>
                   <th className="text-left px-4 py-3 text-sm font-medium text-gray-600">组</th>
@@ -139,15 +144,27 @@ export default function UsersGroupsPage() {
               <tbody>
                 {users.map((u) => (
                   <tr key={u.user_id} className="border-t hover:bg-gray-50">
-                    <td className="px-4 py-3 text-sm font-mono">
+                    <td className="px-4 py-3 text-sm">
                       <Link
                         href={`/users-groups/user/${encodeURIComponent(u.user_id)}`}
                         className="text-blue-600 hover:underline"
                       >
-                        {u.user_id}
+                        <span className="font-medium">{u.display_name || u.username || u.user_id.slice(0, 8) + "..."}</span>
                       </Link>
+                      {u.username && u.username !== u.display_name && (
+                        <span className="text-gray-400 text-xs ml-1.5">@{u.username}</span>
+                      )}
                     </td>
-                    <td className="px-4 py-3 text-sm text-gray-600">{u.tenant_id || "-"}</td>
+                    <td className="px-4 py-3 text-sm text-gray-600">{u.email || "-"}</td>
+                    <td className="px-4 py-3 text-sm text-gray-600">
+                      {u.tenants.length > 0
+                        ? u.tenants.map((t) => (
+                            <span key={t} className="bg-purple-100 text-purple-800 px-2 py-0.5 rounded text-xs mr-1">
+                              {t}
+                            </span>
+                          ))
+                        : (u.tenant_id || "-")}
+                    </td>
                     <td className="px-4 py-3 text-sm">
                       {u.roles.length > 0
                         ? u.roles.map((r) => (
