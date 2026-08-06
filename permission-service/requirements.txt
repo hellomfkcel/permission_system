@@ -30,6 +30,16 @@ slowapi>=0.1.9
 # 结构化日志
 structlog>=24.0
 
+# OpenTelemetry 可观测性（P1: 权限服务 OTel 埋点 + FastAPI 自动插桩）
+opentelemetry-api>=1.33.0
+opentelemetry-sdk>=1.33.0
+opentelemetry-exporter-otlp-proto-http>=1.33.0
+opentelemetry-instrumentation-fastapi>=0.54b0
+opentelemetry-instrumentation-asgi>=0.54b0
+
+# Langfuse 模型观测（fail-open，未配置密钥时跳过）
+langfuse>=2.0,<5.0
+
 # 测试
 pytest>=8.0
 pytest-asyncio>=0.23.0
