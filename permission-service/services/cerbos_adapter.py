@@ -7,8 +7,16 @@ Cerbos PDP 临时不可达时自动重试（最多 2 次），避免单次网络
 """
 
 import asyncio
+import time as _time
 import httpx
 from app.config import settings
+
+# OTel span — fail-open（tracing 未初始化时静默跳过）
+try:
+    from opentelemetry import trace as _otel_trace
+    _TRACER = _otel_trace.get_tracer("permission-service")
+except Exception:
+    _TRACER = None
 
 
 class CerbosAdapter:
@@ -38,6 +46,7 @@ class CerbosAdapter:
         """调用 Cerbos /api/check/resources 批量判定。
 
         带重试：5xx/网络错误自动重试，4xx 立即抛出。
+        自动产生 OTel span "cerbos.check_resources" 上报到 Tempo。
 
         Args:
             request_id: 请求追踪 ID。
@@ -51,40 +60,80 @@ class CerbosAdapter:
             httpx.HTTPStatusError: 4xx 客户端错误（不重试）。
             httpx.RequestError: 网络错误（经重试后仍失败）。
         """
+        # OTel span
+        span = None
+        _start = _time.monotonic()
+        try:
+            if _TRACER is not None:
+                span = _TRACER.start_span("cerbos.check_resources")
+                span.set_attribute("cerbos.request_id", request_id)
+                span.set_attribute("cerbos.resource_count", len(resources))
+                if resources:
+                    first = resources[0]
+                    if "actions" in first:
+                        span.set_attribute("cerbos.actions", ",".join(first["actions"]))
+        except Exception:
+            span = None
+
         last_exc = None
+        try:
+            for attempt in range(self.MAX_RETRIES + 1):
+                try:
+                    resp = await self._client.post(
+                        "/api/check/resources",
+                        json={
+                            "requestId": request_id,
+                            "principal": principal,
+                            "resources": resources,
+                        },
+                    )
+                    resp.raise_for_status()
+                    result = resp.json()
 
-        for attempt in range(self.MAX_RETRIES + 1):
-            try:
-                resp = await self._client.post(
-                    "/api/check/resources",
-                    json={
-                        "requestId": request_id,
-                        "principal": principal,
-                        "resources": resources,
-                    },
-                )
-                resp.raise_for_status()
-                return resp.json()
+                    # 记录 Cerbos 判定结果到 span
+                    if span is not None:
+                        try:
+                            span.set_attribute("cerbos.attempts", attempt + 1)
+                            span.set_attribute("cerbos.elapsed_ms",
+                                             int((_time.monotonic() - _start) * 1000))
+                            call_id = result.get("cerbosCallId", "")
+                            if call_id:
+                                span.set_attribute("cerbos.call_id", call_id)
+                        except Exception:
+                            pass
 
-            except httpx.HTTPStatusError as exc:
-                # 4xx 是客户端错误，不重试
-                if 400 <= exc.response.status_code < 500:
-                    raise
-                # 5xx 服务端错误，可重试
-                last_exc = exc
-                if attempt < self.MAX_RETRIES:
-                    wait = self.RETRY_BACKOFF_BASE * (2 ** attempt)
-                    await asyncio.sleep(wait)
+                    return result
 
-            except (httpx.RequestError, httpx.TimeoutException) as exc:
-                # 网络错误/超时，可重试
-                last_exc = exc
-                if attempt < self.MAX_RETRIES:
-                    wait = self.RETRY_BACKOFF_BASE * (2 ** attempt)
-                    await asyncio.sleep(wait)
+                except httpx.HTTPStatusError as exc:
+                    # 4xx 是客户端错误，不重试
+                    if 400 <= exc.response.status_code < 500:
+                        raise
+                    # 5xx 服务端错误，可重试
+                    last_exc = exc
+                    if attempt < self.MAX_RETRIES:
+                        wait = self.RETRY_BACKOFF_BASE * (2 ** attempt)
+                        await asyncio.sleep(wait)
 
-        # 重试用尽，抛出最后的异常
-        raise last_exc  # type: ignore[misc]
+                except (httpx.RequestError, httpx.TimeoutException) as exc:
+                    # 网络错误/超时，可重试
+                    last_exc = exc
+                    if attempt < self.MAX_RETRIES:
+                        wait = self.RETRY_BACKOFF_BASE * (2 ** attempt)
+                        await asyncio.sleep(wait)
+
+            # 重试用尽，抛出最后的异常
+            raise last_exc  # type: ignore[misc]
+
+        finally:
+            # 无论成功还是失败，结束 span
+            if span is not None:
+                try:
+                    if last_exc is not None:
+                        span.set_attribute("error", True)
+                        span.set_attribute("error.message", str(last_exc)[:200])
+                    span.end()
+                except Exception:
+                    pass
 
     async def close(self) -> None:
         await self._client.aclose()

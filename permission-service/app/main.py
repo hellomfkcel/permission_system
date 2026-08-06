@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import os as _os
 import structlog
 from contextlib import asynccontextmanager
 
@@ -16,6 +17,10 @@ from app.config import settings
 from app.database import check_db
 from app.limiter import limiter
 from app.client_validator import ClientIdValidationMiddleware
+
+# ── OTel Tracing（必须在 FastAPI app 创建前初始化）──
+from app.observability import init_tracing, instrument_fastapi, init_langfuse
+init_tracing(_os.getenv("OTEL_SERVICE_NAME", "permission-service"))
 
 # ── 结构化日志 ──
 
@@ -112,6 +117,9 @@ async def lifespan(application: FastAPI):
         for w in secret_warnings:
             logger.warning("security_config_warning", detail=w)
 
+    # P-MODEL: Langfuse 模型观测（fail-open，未配置 key 时跳过）
+    init_langfuse()
+
     await check_db()
     logger.info("permission_service_starting",
                 host=settings.host, port=settings.port)
@@ -151,6 +159,10 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# ★ OTel FastAPI 自动埋点（必须在 middleware 注册之前调用，
+#   因为 instrumentor 内部调用 add_middleware）
+instrument_fastapi(app)
 
 # 限流器状态
 app.state.limiter = limiter
