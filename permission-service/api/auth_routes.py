@@ -409,8 +409,9 @@ async def sync_users_from_keycloak() -> SyncResult:
 @router.get("/users", response_model=list[UserInfo])
 async def list_cached_users(
     db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
 ) -> list[UserInfo]:
-    """查询本地缓存的用户列表（从 user_cache 表读取，合并 tenant_memberships）。
+    """查询本地缓存的用户列表（从 user_cache 表读取，合并 tenant_memberships）。需要管理员认证。
 
     管理台用户管理页使用此端点展示用户。
     tenant_id 从 tenant_memberships 聚合（权威源），回退到 user_cache.tenant_id。
@@ -521,8 +522,10 @@ async def list_cached_users(
 
 
 @router.get("/groups")
-async def list_groups_from_keycloak() -> list[dict]:
-    """从 Keycloak 实时获取组列表（管理台用户/组管理页使用）。"""
+async def list_groups_from_keycloak(
+    admin: Principal = Depends(get_current_admin),
+) -> list[dict]:
+    """从 Keycloak 实时获取组列表（管理台用户/组管理页使用）。需要管理员认证。"""
     from idp.keycloak_sync import get_keycloak_sync
 
     try:
@@ -552,8 +555,9 @@ class DashboardStats(BaseModel):
 @router.get("/stats", response_model=DashboardStats)
 async def get_dashboard_stats(
     db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
 ) -> DashboardStats:
-    """Dashboard 概览统计 — 聚合各表计数。"""
+    """Dashboard 概览统计 — 聚合各表计数。需要管理员认证。"""
     from models.resource import ResourceRegistry
     from models.acl import ACLEntry
     from models.restriction import Restriction
@@ -639,8 +643,10 @@ class SystemConfigResponse(BaseModel):
 
 
 @router.get("/config", response_model=SystemConfigResponse)
-async def get_system_config() -> SystemConfigResponse:
-    """返回系统运行时配置（管理台 Settings 页面动态展示）。
+async def get_system_config(
+    admin: Principal = Depends(get_current_admin),
+) -> SystemConfigResponse:
+    """返回系统运行时配置（管理台 Settings 页面动态展示）。需要管理员认证。
 
     P1-6 修复：替代 Settings 页面中硬编码的端口号、限流值、策略规则数。
     这些值从配置文件自动读取，不再需要手动同步前端代码。
@@ -690,9 +696,10 @@ class RecentChangesResponse(BaseModel):
 @router.get("/recent-changes", response_model=RecentChangesResponse)
 async def get_recent_changes(
     db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
     limit: int = Query(20, description="返回条数上限"),
 ) -> RecentChangesResponse:
-    """返回最近权限变更时间线和待处理告警。
+    """返回最近权限变更时间线和待处理告警。需要管理员认证。
 
     P1-7 修复：为 Dashboard 提供最近变更时间线和告警面板数据。
     """

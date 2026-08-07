@@ -1,9 +1,15 @@
-"""Cerbos 策略解析器 — 从 YAML 文件解析角色→权限矩阵。
+"""Cerbos 策略解析器 — 从 YAML 文件解析角色→权限矩阵 + 运行时缓存。
 
 设计依据：docs/manage_role_design.md §4.2 权限矩阵的数据来源。
+
+P3 修复：消除 ROLE_ACTIONS_MAP 硬编码副本风险。
+Cerbos YAML 是角色→权限映射的唯一权威源。
+get_role_actions_map() 从 YAML 解析 + 内存缓存 + 写时失效，
+替换原来的 ROLE_ACTIONS_MAP 硬编码字典。
 """
 
 import os
+import threading
 from pathlib import Path
 
 import yaml
@@ -14,6 +20,14 @@ _CERBOS_POLICIES_DIR = os.getenv(
     "CERBOS_POLICIES_DIR",
     "/home/mfkcel/proj_rag_dev/cerbos/policies",
 )
+
+# ── 角色动作映射缓存 ──
+# 从 Cerbos YAML 解析得到的 {role_name: [action_strings]} 映射。
+# 首次调用 get_role_actions_map() 时解析并缓存。
+# 策略文件变更后调用 invalidate_role_actions_cache() 失效缓存，
+# 下次查询时自动重新解析。
+_cache_lock = threading.Lock()
+_role_actions_cache: dict[str, list[str]] | None = None
 
 
 def _load_yaml(path: str) -> dict:
@@ -89,3 +103,51 @@ def parse_permissions_matrix() -> dict:
         })
 
     return {"roles": roles_list}
+
+
+def get_role_actions_map() -> dict[str, list[str]]:
+    """从 Cerbos YAML 解析角色→权限动作映射（带缓存）。
+
+    替代原来的 app/role_actions_config.py:ROLE_ACTIONS_MAP 硬编码字典。
+    Cerbos YAML 是唯一权威源，消除手动同步风险。
+
+    首次调用时解析 YAML 并缓存。缓存通过 invalidate_role_actions_cache()
+    主动失效（策略文件变更时触发），也可等待 TTL 自然过期。
+
+    Returns:
+        {role_name: [action_strings]}，如 {"kb_reader": ["kb:read", "doc:view", ...]}
+    """
+    global _role_actions_cache
+
+    with _cache_lock:
+        if _role_actions_cache is not None:
+            return _role_actions_cache
+
+    # 缓存未命中 → 从 Cerbos YAML 解析
+    mapping: dict[str, list[str]] = {}
+    matrix = parse_permissions_matrix()
+    for role_info in matrix.get("roles", []):
+        if role_info.get("source") == "cerbos":
+            name = role_info["name"]
+            mapping[name] = sorted(role_info.get("permissions", []))
+
+    with _cache_lock:
+        _role_actions_cache = mapping
+
+    return mapping
+
+
+def invalidate_role_actions_cache() -> None:
+    """主动失效角色动作映射缓存。
+
+    在以下场景调用：
+    - PUT /api/v1/policies/{path}  — 策略文件写入
+    - DELETE /api/v1/policies/{path} — 策略文件删除
+    - POST /api/v1/roles/definitions — 创建自定义角色（写入 Cerbos YAML）
+    - DELETE /api/v1/roles/definitions/{name} — 删除自定义角色（清理 YAML）
+
+    缓存失效后，下次 get_role_actions_map() 调用时自动重新解析。
+    """
+    global _role_actions_cache
+    with _cache_lock:
+        _role_actions_cache = None

@@ -153,14 +153,15 @@ async def create_tenant(
 @router.get("", response_model=TenantListResponse)
 async def list_tenants(
     db: AsyncSession = Depends(get_db),
+    admin: dict = Depends(get_current_admin),
     status: str | None = Query(None, description="筛选状态"),
     search: str | None = Query(None, description="搜索 ID 或名称"),
     limit: int = Query(50, ge=1, le=200, description="每页条数"),
     offset: int = Query(0, ge=0, description="偏移量"),
 ) -> TenantListResponse:
-    """获取租户列表。
+    """获取租户列表。需要管理员认证。
 
-    需认证。system_admin 可查看全部租户；普通用户仅返回自己所属的租户。
+    system_admin 可查看全部租户；普通用户仅返回自己所属的租户。
     """
     conditions = []
     if status:
@@ -219,8 +220,9 @@ async def list_tenants(
 async def get_tenant(
     tenant_id: str,
     db: AsyncSession = Depends(get_db),
+    admin: dict = Depends(get_current_admin),
 ) -> TenantResponse:
-    """获取单个租户详情。"""
+    """获取单个租户详情。需要管理员认证。"""
     tenant = await _get_tenant_or_404(db, tenant_id)
     mc = await _get_member_count(db, tenant_id)
     return _tenant_to_response(tenant, member_count=mc)
@@ -297,9 +299,10 @@ async def delete_tenant(
 async def list_tenant_members(
     tenant_id: str,
     db: AsyncSession = Depends(get_db),
+    admin: dict = Depends(get_current_admin),
     include_revoked: bool = Query(False, description="是否包含已移除的成员"),
 ) -> TenantMemberListResponse:
-    """获取租户成员列表。"""
+    """获取租户成员列表。需要管理员认证。"""
     tenant = await _get_tenant_or_404(db, tenant_id)
 
     conditions = [TenantMembership.tenant_id == tenant_id]
@@ -411,8 +414,9 @@ async def remove_tenant_member(
 async def get_user_tenants(
     user_id: str,
     db: AsyncSession = Depends(get_db),
+    admin: dict = Depends(get_current_admin),
 ) -> UserTenantsResponse:
-    """获取用户所属的所有活跃租户。"""
+    """获取用户所属的所有活跃租户。需要管理员认证。"""
     # 查询用户的所有活跃绑定
     stmt = (
         select(TenantMembership.tenant_id)

@@ -66,8 +66,10 @@ async def check_permission(
         raise HTTPException(status_code=401, detail="Invalid credential") from e
 
     # 2-4. 查询 ACL + 封禁 + 资源属性
+    channel_kb = body.channel.kb if body.channel else None
     principal_actions = await resolve_granted_actions_by_principal(
         db, principal.principals, body.action, body.resource.type, body.resource.id,
+        channel_kb=channel_kb,
     )
     # Build granted_actions dict: {resource_id: [action_suffix, ...]}
     # Cerbos derived roles expect values like ["read"] not ["kb:read"]
@@ -208,17 +210,23 @@ async def check_batch(
     # 3. 收集所有唯一的 (action, resource_type) 组合以查询 ACL
     # 查询所有 ACL：对每个不同的 action+resource_type 批量查询
     action_resources: dict[tuple[str, str], set[str]] = {}
+    # 同时跟踪每个 resource_id 对应的 channel_kb（document 资源的 KB 归属）
+    resource_channels: dict[str, str | None] = {}
     for item in body.items:
         key = (item.action, item.resource.type)
         action_resources.setdefault(key, set()).add(item.resource.id)
+        if item.resource.type == "document" and item.channel and item.channel.kb:
+            resource_channels[item.resource.id] = item.channel.kb
 
     # 聚合 granted_actions: {resource_id: [action_suffix, ...]}
     # P1-4 修复：document 资源以 kb_id 为键（与单条 check 一致）
     all_granted: dict[str, list[str]] = {}
     for (action, res_type), res_ids in action_resources.items():
         for rid in res_ids:
+            kb = resource_channels.get(rid)
             pa = await resolve_granted_actions_by_principal(
                 db, principal.principals, action, res_type, rid,
+                channel_kb=kb,
             )
             for p_actions in pa.values():
                 for a in p_actions:
@@ -366,6 +374,7 @@ async def filter_items(
             doc_actions = await resolve_granted_actions_by_principal(
                 db, principal.principals, "doc:retrieve",
                 item.resource_type, item.resource_id,
+                channel_kb=kb_id,
             )
             # Merge: kb:read → "read", doc:retrieve → "read" (both map to read on kb)
             has_access = False
