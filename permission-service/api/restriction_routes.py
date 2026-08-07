@@ -194,8 +194,9 @@ async def list_restrictions(
     resource_type: str | None = Query(None),
     resource_id: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
 ) -> list[RestrictionOut]:
-    """查询封禁/限制列表。"""
+    """查询封禁/限制列表（需要管理员认证）。"""
     conditions = [Restriction.removed == False]  # noqa: E712
     if principal:
         conditions.append(Restriction.principal == principal)

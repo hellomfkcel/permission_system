@@ -18,15 +18,19 @@ async def resolve_granted_actions_by_principal(
     action: str,
     resource_type: str,
     resource_id: str,
+    channel_kb: str | None = None,
 ) -> dict[str, list[str]]:
-    """查询 ACL 表中匹配任意 principal 的 action 列表。
+    """查询 ACL + role_bindings 中匹配任意 principal 的 action 列表。
 
     返回 {principal: [action, ...]} 映射。
     """
     from datetime import datetime, timezone
+    from services.cerbos_policy_parser import get_role_actions_map
+    role_actions_map = get_role_actions_map()
 
     now = datetime.now(timezone.utc)
 
+    # 1. 直接 ACL 查询
     stmt = select(ACLEntry.principal, ACLEntry.action).where(
         ACLEntry.principal.in_(principals),
         ACLEntry.resource_type == resource_type,
@@ -45,6 +49,52 @@ async def resolve_granted_actions_by_principal(
         p = row[0]
         a = row[1]
         mapping.setdefault(p, []).append(a)
+
+    # 2. 角色绑定展开：将 role_bindings 展开为隐式动作
+    #    设计依据：docs/权限管理系统架构设计.md §2.3 准入矩阵
+    #    - 无范围绑定 (resource_type IS NULL) → 适用于所有资源
+    #    - KB 范围绑定 → 适用于该 KB 及其下文档（通过 channel.kb 匹配）
+    #    - Document 范围绑定 → 适用于该文档
+    #    P3 修复：角色→动作映射从 Cerbos YAML 动态解析，消除硬编码同步风险。
+    rb_stmt = select(
+        RoleBinding.principal, RoleBinding.role,
+        RoleBinding.resource_type, RoleBinding.resource_id,
+    ).where(
+        RoleBinding.principal.in_(principals),
+        RoleBinding.revoked == False,  # noqa: E712
+    )
+    rb_result = await db.execute(rb_stmt)
+    role_rows = rb_result.fetchall()
+
+    for row in role_rows:
+        rb_principal = row[0]
+        rb_role = row[1]
+        rb_res_type = row[2]
+        rb_res_id = row[3]
+
+        # 判断此角色绑定是否适用于当前资源
+        applies = False
+        if rb_res_type is None and rb_res_id is None:
+            # 无范围绑定 → 适用于所有资源
+            applies = True
+        elif rb_res_type == resource_type and rb_res_id == resource_id:
+            # 精确匹配 → 适用于该资源
+            applies = True
+        elif resource_type == "document" and channel_kb:
+            # 文档资源 → 检查 KB 级绑定是否匹配该文档的 channel.kb
+            if rb_res_type == "kb" and rb_res_id == channel_kb:
+                applies = True
+
+        if not applies:
+            continue
+
+        # 展开角色隐式动作（从 Cerbos YAML 动态解析，非硬编码）
+        implicit_actions = role_actions_map.get(rb_role, [])
+        for ia in implicit_actions:
+            mapping.setdefault(rb_principal, [])
+            if ia not in mapping[rb_principal]:
+                mapping[rb_principal].append(ia)
+
     return mapping
 
 
@@ -106,7 +156,15 @@ async def get_resource_attr(
     result = await db.execute(stmt)
     row = result.scalar_one_or_none()
     if row is None:
-        return {"is_enabled": True, "allow_download": True}
+        # 资源未注册 → 视为活跃（未退役、启用、允许下载）。
+        # 必须显式设置 retired=False，否则 Cerbos CEL 条件
+        # "retired == false" 在属性缺失时求值为 null == false → false，
+        # 导致所有规则（doc:view/unmount 等）判定 deny。
+        return {
+            "retired": False,
+            "is_enabled": True,
+            "allow_download": True,
+        }
     return {
         "retired": row.retired,
         "owner": row.owner,

@@ -20,7 +20,6 @@ from services.event_publisher import get_event_publisher
 from api.auth_routes import get_current_admin
 from schemas.responses import Principal
 from app.role_actions_config import (
-    ROLE_ACTIONS_MAP,
     VALID_ACTIONS,
     VALID_RESOURCE_TYPES,
 )
@@ -207,8 +206,9 @@ async def list_acl(
     principal: str | None = Query(None),
     revoked: bool | None = Query(None),
     db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
 ) -> list[ACLEntryOut]:
-    """查询 ACL 列表。"""
+    """查询 ACL 列表（需要管理员认证）。"""
     conditions = []
     if resource_type:
         conditions.append(ACLEntry.resource_type == resource_type)
@@ -257,8 +257,9 @@ async def get_effective_permissions(
     resource_type: str | None = Query(None),
     resource_id: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
 ) -> list[EffectivePermission]:
-    """计算某主体对资源的有效权限（合并 ACL + 角色绑定 + 封禁）。
+    """计算某主体对资源的有效权限（合并 ACL + 角色绑定 + 封禁）。需要管理员认证。
 
     设计依据：docs/外部系统设计.md §2.4.4 ACL 管理 — 有效权限计算。
     """
@@ -295,7 +296,8 @@ async def get_effective_permissions(
         source = "acl"
         for rb in role_bindings:
             source = "combined" if source == "acl" else source
-            implicit = ROLE_ACTIONS_MAP.get(rb.role, [])
+            from services.cerbos_policy_parser import get_role_actions_map as _gram
+            implicit = _gram().get(rb.role, [])
             for a in implicit:
                 if a not in actions:
                     actions.append(a)

@@ -183,8 +183,9 @@ async def list_bindings(
     resource_type: str | None = Query(None),
     resource_id: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
 ) -> list[RoleBindingOut]:
-    """查询角色绑定列表。"""
+    """查询角色绑定列表（需要管理员认证）。"""
     conditions = [RoleBinding.revoked == False]  # noqa: E712
     if principal:
         conditions.append(RoleBinding.principal == principal)

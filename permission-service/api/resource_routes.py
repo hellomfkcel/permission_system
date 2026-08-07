@@ -36,8 +36,9 @@ async def list_resources(
     type: str | None = Query(None, alias="type", description="资源类型: kb | document"),
     tenant_id: str | None = Query(None, description="租户 ID 过滤"),
     db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
 ) -> list[ResourceOut]:
-    """列出已注册资源 — 供管理台资源管理页使用。
+    """列出已注册资源 — 供管理台资源管理页使用。需要管理员认证。
 
     支持按 type、tenant_id 过滤，最多返回 500 条。
     """

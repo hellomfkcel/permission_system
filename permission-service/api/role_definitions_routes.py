@@ -61,8 +61,9 @@ class CreateRoleRequest(BaseModel):
 @router.get("/definitions", response_model=list[RoleDefOut])
 async def list_role_definitions(
     db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
 ) -> list[RoleDefOut]:
-    """获取所有角色定义列表（含绑定计数）。"""
+    """获取所有角色定义列表（含绑定计数）。需要管理员认证。"""
     stmt = select(RoleDefinition).order_by(RoleDefinition.name)
     result = await db.execute(stmt)
     roles = result.scalars().all()
@@ -117,8 +118,9 @@ async def list_role_definitions(
 async def get_role_definition(
     name: str,
     db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
 ) -> RoleDetailOut:
-    """获取单个角色详情（含权限列表）。"""
+    """获取单个角色详情（含权限列表）。需要管理员认证。"""
     stmt = select(RoleDefinition).where(RoleDefinition.name == name)
     result = await db.execute(stmt)
     r = result.scalar_one_or_none()
@@ -200,6 +202,9 @@ async def create_role_definition(
         _write_cerbos_yaml_for_role(
             body.name, body.parent_keycloak_roles, permissions
         )
+        # P3 修复：Cerbos YAML 变更后失效角色动作映射缓存。
+        from services.cerbos_policy_parser import invalidate_role_actions_cache
+        invalidate_role_actions_cache()
     except Exception as e:
         import structlog
         _logger = structlog.get_logger(__name__)
@@ -363,14 +368,19 @@ async def delete_role_definition(
     # 清理 Cerbos YAML 策略文件
     try:
         _cleanup_cerbos_yaml_for_role(name)
+        # P3 修复：Cerbos YAML 变更后失效角色动作映射缓存。
+        from services.cerbos_policy_parser import invalidate_role_actions_cache
+        invalidate_role_actions_cache()
     except Exception as e:
         import structlog
         _logger = structlog.get_logger(__name__)
         _logger.warning("cerbos_yaml_cleanup_failed", role=name, error=str(e)[:200])
 
 @router.get("/permissions", response_model=PermissionMatrixOut)
-async def get_permissions_matrix() -> PermissionMatrixOut:
-    """获取完整的角色-权限矩阵（从 Cerbos 策略 YAML 解析）。
+async def get_permissions_matrix(
+    admin: Principal = Depends(get_current_admin),
+) -> PermissionMatrixOut:
+    """获取完整的角色-权限矩阵（从 Cerbos 策略 YAML 解析）。需要管理员认证。
 
     只读视图。仅包含权限角色（Cerbos 派生角色 + 自定义角色），
     不包含 Keycloak 身份角色（user / system_admin）。

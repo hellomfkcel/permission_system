@@ -80,8 +80,9 @@ async def list_audit_entries(
     from_version: int | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
 ) -> list[AuditEntry]:
-    """审计日志查询 — 按条件过滤变更历史。
+    """审计日志查询 — 按条件过滤变更历史。需要管理员认证。
 
     P2-3 修复：新增 principal、decision_id、from_time、to_time 过滤参数。
     """
@@ -147,8 +148,9 @@ async def list_audit_entries(
 @router.post("/simulate", response_model=SimulateResult)
 async def simulate(
     body: SimulateRequest,
+    admin: Principal = Depends(get_current_admin),
 ) -> SimulateResult:
-    """策略模拟器 — 直接在 Cerbos PDP 上运行判定。
+    """策略模拟器 — 直接在 Cerbos PDP 上运行判定。需要管理员认证。
 
     用于管理台 Playground，不涉及 ACL/角色绑定数据库查询。
     """
@@ -283,8 +285,9 @@ class ReplayResult(BaseModel):
 async def replay_events(
     body: ReplayRequest,
     db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
 ) -> ReplayResult:
-    """事件重放 / 补消费 — 从指定版本开始重新发布事件到 Redis。
+    """事件重放 / 补消费 — 从指定版本开始重新发布事件到 Redis。需要管理员认证。
 
     设计依据：docs/外部系统设计.md §5.2 事件可靠性保证 + §14.5c 戳记对账。
 
@@ -436,10 +439,13 @@ def _validate_policy_path(policy_path: str) -> tuple[bool, str]:
 
 
 @router.get("/policies", response_model=list[PolicyFileResponse])
-async def list_policy_files() -> list[PolicyFileResponse]:
-    """列出所有 Cerbos 策略文件及其 YAML 内容。
+async def list_policy_files(
+    admin: Principal = Depends(get_current_admin),
+) -> list[PolicyFileResponse]:
+    """列出所有 Cerbos 活跃策略文件及其 YAML 内容。需要管理员认证。
 
     从文件系统读取 cerbos/policies/ 目录下的实际策略文件，
+    排除 .versions/ 目录（版本历史快照，非活跃策略）。
     供管理台策略管理页实时查看。
     设计依据：docs/外部系统设计.md §3.4.2。
     """
@@ -452,16 +458,20 @@ async def list_policy_files() -> list[PolicyFileResponse]:
 
     for yaml_file in policy_root.rglob("*.yaml"):
         rel_path = yaml_file.relative_to(policy_root)
+        rel_str = str(rel_path)
+        # 排除 .versions/ 目录下的版本快照文件
+        if ".versions" in Path(rel_str).parts:
+            continue
         try:
             content = yaml_file.read_text(encoding="utf-8")
         except Exception:
-            content = f"# Error reading {rel_path}"
+            content = f"# Error reading {rel_str}"
 
         parent = rel_path.parent.name if str(rel_path.parent) != "." else ""
         name = f"{parent}/{rel_path.stem}" if parent else rel_path.stem
 
         result.append(PolicyFileResponse(
-            path=str(rel_path),
+            path=rel_str,
             name=name,
             yaml_content=content,
         ))
@@ -518,6 +528,11 @@ async def write_policy_file(
 
     # Cerbos PDP 自动热加载（watchForChanges: true），无需手动触发
 
+    # P3 修复：策略文件写入后失效角色动作映射缓存，
+    # 确保下次权限判定使用最新的 Cerbos YAML 解析结果。
+    from services.cerbos_policy_parser import invalidate_role_actions_cache
+    invalidate_role_actions_cache()
+
     logger.info(
         "policy_file_written",
         path=safe_path,
@@ -560,6 +575,10 @@ async def delete_policy_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete policy file: {str(e)}")
 
+    # P3 修复：策略文件删除后失效角色动作映射缓存。
+    from services.cerbos_policy_parser import invalidate_role_actions_cache
+    invalidate_role_actions_cache()
+
     logger.info(
         "policy_file_deleted",
         path=safe_path,
@@ -592,43 +611,69 @@ async def get_deploy_status(
 ) -> DeployStatusResult:
     """查询 Cerbos PDP 策略部署状态（P2-6 新增）。
 
-    通过直接 HTTP 调用 Cerbos PDP 管理 API 检查策略加载状态。
+    混合校验方案（方案 C）：
+    1. 文件系统统计策略 YAML 文件数（与 PDP 加载的数据源一致）
+    2. HTTP 探活 Cerbos PDP（GET / 返回 200 = PDP 运行中）
+    3. 综合判定健康状态
+
     设计依据：docs/外部系统设计.md §3.3 /policies — 策略部署 + 灰度发布。
+    Cerbos PDP HTTP API 不存在 /api/policies 端点（仅 gRPC Admin API 有此能力），
+    因此改用文件计数 + HTTP 探活的混合校验方案。
     """
     import httpx
+    from pathlib import Path
 
-    policies_count = 0
-    cerbos_version = ""
     status = "unknown"
     message = ""
+    cerbos_version = ""
+    policies_count = 0
+
+    # ── 1. 文件系统统计策略文件数 ──
+    # Cerbos 配置 storage.driver=disk + watchForChanges=true，
+    # 策略文件即 PDP 加载的权威数据源。
+    # 排除 .versions/ 目录（版本历史快照，非活跃策略）。
+    policy_root = _get_policy_root()
+    try:
+        yaml_files = list(policy_root.rglob("*.yaml")) + list(policy_root.rglob("*.yml"))
+        # 去重 + 排除 .versions/ 目录
+        active_files = set()
+        for f in yaml_files:
+            resolved = f.resolve()
+            if ".versions" not in resolved.parts:
+                active_files.add(resolved)
+        policies_count = len(active_files)
+    except Exception:
+        policies_count = 0  # 文件系统不可达时回退
+
+    # ── 2. HTTP 探活 Cerbos PDP ──
     pdp_base = settings.cerbos_pdp_url.rstrip("/")
-
+    pdp_reachable = False
     async with httpx.AsyncClient(timeout=10.0) as client:
-        # 获取策略列表（验证 PDP 可达性 + 策略加载状态）
         try:
-            resp = await client.get(f"{pdp_base}/api/policies")
+            resp = await client.get(f"{pdp_base}/")
             if resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, dict):
-                    policies_count = len(data)
-                status = "healthy"
-                message = f"{policies_count} policies loaded by Cerbos PDP"
-            else:
-                status = "degraded"
-                message = f"Cerbos PDP returned HTTP {resp.status_code}"
-        except Exception as e:
-            status = "unknown"
-            message = f"Cannot reach Cerbos PDP: {str(e)[:100]}"
+                pdp_reachable = True
+                # 尝试从响应中提取 Cerbos 版本（rapidoc HTML 或 JSON）
+                ct = resp.headers.get("content-type", "")
+                if "json" in ct:
+                    try:
+                        ver_data = resp.json()
+                        cerbos_version = str(ver_data.get("version", ""))
+                    except Exception:
+                        pass
+        except Exception:
+            pdp_reachable = False
 
-        # 获取 Cerbos 版本
-        if status == "healthy":
-            try:
-                resp2 = await client.get(f"{pdp_base}/api/server/version")
-                if resp2.status_code == 200:
-                    ver_data = resp2.json()
-                    cerbos_version = ver_data.get("version", "")
-            except Exception:
-                pass
+    # ── 3. 综合判定 ──
+    if pdp_reachable and policies_count > 0:
+        status = "healthy"
+        message = f"{policies_count} policies loaded by Cerbos PDP"
+    elif pdp_reachable and policies_count == 0:
+        status = "degraded"
+        message = "Cerbos PDP is running but no policy files found — check cerbos/policies/ directory"
+    elif not pdp_reachable:
+        status = "unknown"
+        message = "Cannot reach Cerbos PDP — service may be starting or unreachable"
 
     return DeployStatusResult(
         status=status,
@@ -810,8 +855,11 @@ class PolicyDiffResponse(BaseModel):
 
 
 @router.get("/policies/{policy_path:path}/versions", response_model=list[PolicyVersionEntry])
-async def list_policy_versions(policy_path: str) -> list[PolicyVersionEntry]:
-    """列出策略文件的所有历史版本。
+async def list_policy_versions(
+    policy_path: str,
+    admin: Principal = Depends(get_current_admin),
+) -> list[PolicyVersionEntry]:
+    """列出策略文件的所有历史版本。需要管理员认证。
 
     设计依据：docs/外部系统设计.md §3.3 /policies 页面 — 策略版本历史。
     """
@@ -863,10 +911,11 @@ async def list_policy_versions(policy_path: str) -> list[PolicyVersionEntry]:
 @router.get("/policies/{policy_path:path}/diff", response_model=PolicyDiffResponse)
 async def diff_policy_versions(
     policy_path: str,
+    admin: Principal = Depends(get_current_admin),
     v1: str = Query("current", description="基准版本 ID 或 'current'"),
     v2: str = Query(..., description="对比版本 ID"),
 ) -> PolicyDiffResponse:
-    """对比两个策略版本的差异。
+    """对比两个策略版本的差异。需要管理员认证。
 
     设计依据：docs/外部系统设计.md §3.3 /policies 页面 — Git 式 diff 视图。
 
