@@ -17,15 +17,37 @@ from schemas.responses import ContextResponse
 
 router = APIRouter(prefix="/v1", tags=["context"])
 
-# ── 合法 audience 注册表 ──
-# 设计依据：docs/RAG系统设计v14.md §6.7 + §6A.5
-# audience 必须与消费方服务名一致。
-# 新增消费方须在此注册后方可调用 /v1/context。
-_ALLOWED_AUDIENCES: set[str] = {
-    "retrieval-worker",   # RAG 系统 retrieval-worker（Celery 异步检索任务）
-    "ingestion-worker",   # RAG 系统 ingestion-worker（预留）
-    "stamping-worker",    # RAG 系统 stamping-worker（预留）
-}
+# ── audience 缓存（Phase 1: 替代硬编码 _ALLOWED_AUDIENCES）──
+# 从 project_audiences 表加载，60s TTL 内存缓存。
+_audience_cache: set[str] = set()
+_audience_cache_ts: float = 0.0
+_AUDIENCE_CACHE_TTL = 60.0
+
+
+def invalidate_audience_cache() -> None:
+    """主动失效 audience 缓存（project_audiences 变更后调用）。"""
+    global _audience_cache, _audience_cache_ts
+    _audience_cache.clear()
+    _audience_cache_ts = 0.0
+
+
+async def _refresh_audience_cache() -> set[str]:
+    """从 project_audiences 表刷新合法 audience 集合。"""
+    global _audience_cache, _audience_cache_ts
+    import time as _t
+    from app.database import async_session
+    from sqlalchemy import select
+    from models.project import ProjectAudience
+
+    now = _t.monotonic()
+    if _audience_cache and (now - _audience_cache_ts) < _AUDIENCE_CACHE_TTL:
+        return _audience_cache
+
+    async with async_session() as db:
+        result = await db.execute(select(ProjectAudience.audience))
+        _audience_cache = {row.audience for row in result}
+        _audience_cache_ts = now
+    return _audience_cache
 
 
 def _sign(payload: dict, secret: bytes) -> str:
@@ -63,15 +85,16 @@ async def mint_context_token(
     # ttl_s 上限校验
     ttl_s = min(body.ttl_s, 600)
 
-    # audience 校验：必须在注册表中
-    if body.audience not in _ALLOWED_AUDIENCES:
+    # audience 校验（Phase 1: 从 DB 查询，替代硬编码 _ALLOWED_AUDIENCES）
+    allowed = await _refresh_audience_cache()
+    if body.audience not in allowed:
         raise HTTPException(
             status_code=400,
             detail={
                 "error": "invalid_audience",
                 "message": (
                     f"Unknown audience '{body.audience}'. "
-                    f"Allowed: {sorted(_ALLOWED_AUDIENCES)}"
+                    f"Register it in the project management page."
                 ),
             },
         )

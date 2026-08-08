@@ -13,21 +13,7 @@ import { useEffect, useState, useCallback } from "react";
 import api from "@/lib/api";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useToast, showConfirm } from "@/components/shared/Toast";
-import { DERIVED_ROLES, ROLE_LABELS, type DerivedRole } from "@/lib/constants";
 import { useResourceNames } from "@/lib/useResourceNames";
-
-// ── 可用角色（权威源: lib/constants.ts，对齐 Cerbos derived_roles/rag_roles.yaml）──
-const AVAILABLE_ROLES = DERIVED_ROLES.map((role: DerivedRole) => ({
-  value: role,
-  label: ROLE_LABELS[role],
-  desc: role === "admin"
-    ? "全部权限（无条件 allow）"
-    : role === "kb_admin"
-    ? "可管理 KB 配置 + 写者权限"
-    : role === "kb_writer"
-    ? "可写入/上传文档 + 读者权限"
-    : "可读取 KB 内容 + 查看/检索文档",
-}));
 
 interface RoleBinding {
   id: string;
@@ -48,22 +34,25 @@ interface PrincipalOption {
 }
 
 export default function RoleBindingManager() {
-  const { user } = useAuthStore();
+  const { user, currentProjectId } = useAuthStore();
   const { showToast } = useToast();
   const { formatResource } = useResourceNames();
 
   // ── 状态 ──
   const [bindings, setBindings] = useState<RoleBinding[]>([]);
+  const [availableRoles, setAvailableRoles] = useState<{value: string; label: string; desc: string}[]>([]);
   const [loading, setLoading] = useState(true);
   const [showBindForm, setShowBindForm] = useState(false);
 
   // 绑定表单
   const [bindPrincipal, setBindPrincipal] = useState("");
   const [bindPrincipalSearch, setBindPrincipalSearch] = useState("");
-  const [bindRole, setBindRole] = useState("kb_reader");
+  const [bindRole, setBindRole] = useState("");
   const [bindResourceType, setBindResourceType] = useState("");
   const [bindResourceId, setBindResourceId] = useState("");
   const [bindSubmitting, setBindSubmitting] = useState(false);
+  // 动态资源类型列表
+  const [availableResourceTypes, setAvailableResourceTypes] = useState<string[]>([]);
 
   // 筛选
   const [filterPrincipal, setFilterPrincipal] = useState("");
@@ -73,7 +62,45 @@ export default function RoleBindingManager() {
   const [principalOptions, setPrincipalOptions] = useState<PrincipalOption[]>([]);
   const [filteredPrincipals, setFilteredPrincipals] = useState<PrincipalOption[]>([]);
 
-  // ── 加载 ──
+  // ── 加载可用资源类型（合并 resource_registry + Cerbos YAML）──
+  const loadResourceTypes = useCallback(async () => {
+    try {
+      const [res, configRes] = await Promise.all([
+        api.get("/api/v1/resources"),
+        api.get("/api/v1/auth/config"),
+      ]);
+      const types = new Set((res.data as Array<{resource_type: string}>).map(r => r.resource_type));
+      // 合并 Cerbos YAML 中定义的资源类型（如 oa_leave_request）
+      const resourceActions: Record<string, string[]> = configRes.data.resource_actions || {};
+      for (const rt of Object.keys(resourceActions)) {
+        types.add(rt);
+      }
+      setAvailableResourceTypes(Array.from(types).sort());
+    } catch {
+      setAvailableResourceTypes(["kb", "document", "platform"]);
+    }
+  }, []);
+
+  // ── 加载角色定义（按项目范围）──
+  const loadRoles = useCallback(async () => {
+    try {
+      const res = await api.get("/api/v1/roles/definitions");
+      const defs = res.data as Array<{name: string; description: string; project_id: string | null}>;
+      const roles = defs.map(d => ({
+        value: d.name,
+        label: d.name,
+        desc: d.description || "",
+      }));
+      setAvailableRoles(roles);
+      if (roles.length > 0 && !roles.find(r => r.value === bindRole)) {
+        setBindRole(roles[0].value);
+      }
+    } catch {
+      // keep defaults
+    }
+  }, [bindRole]);
+
+  // ── 加载绑定 ──
   const loadBindings = useCallback(async () => {
     setLoading(true);
     try {
@@ -113,7 +140,9 @@ export default function RoleBindingManager() {
     setPrincipalOptions(opts);
   }, [bindings]);
 
-  useEffect(() => { loadBindings(); }, [loadBindings]);
+  useEffect(() => { loadResourceTypes(); }, [loadResourceTypes, currentProjectId]);
+  useEffect(() => { loadRoles(); }, [loadRoles, currentProjectId]);
+  useEffect(() => { loadBindings(); }, [loadBindings, currentProjectId]);
   useEffect(() => { if (bindings.length > 0) loadPrincipals(); }, [bindings, loadPrincipals]);
 
   // ── 主体过滤 ──
@@ -129,6 +158,7 @@ export default function RoleBindingManager() {
     if (!bindPrincipal.trim()) return showToast("error", "请输入或选择主体");
     setBindSubmitting(true);
     try {
+      const pid = currentProjectId && currentProjectId !== "__all__" ? currentProjectId : "rag-v14";
       await api.post("/api/v1/roles/bind", {
         tenant_id: user?.tenant_id || "tenant-dev",
         principal: bindPrincipal.trim(),
@@ -136,11 +166,12 @@ export default function RoleBindingManager() {
         resource_type: bindResourceType.trim() || null,
         resource_id: bindResourceId.trim() || null,
         granted_by: `user:${user?.user_id || "admin"}`,
+        project_id: pid,
       });
       showToast("success", `已绑定角色 ${bindRole} 到 ${bindPrincipal}`);
       setShowBindForm(false);
       setBindPrincipal("");
-      setBindRole("kb_reader");
+      setBindRole(availableRoles[0]?.value || "");
       setBindResourceType("");
       setBindResourceId("");
       loadBindings();
@@ -177,7 +208,7 @@ export default function RoleBindingManager() {
   });
 
   // ── 统计 ──
-  const roleStats = AVAILABLE_ROLES.map(r => ({
+  const roleStats = availableRoles.map(r => ({
     ...r,
     count: bindings.filter(b => b.role === r.value).length,
   }));
@@ -210,7 +241,7 @@ export default function RoleBindingManager() {
             className="border border-gray-300 rounded-lg px-3 py-2 text-sm"
           >
             <option value="">全部角色</option>
-            {AVAILABLE_ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+            {availableRoles.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
           </select>
         </div>
         <button
@@ -263,9 +294,9 @@ export default function RoleBindingManager() {
                 onChange={e => setBindRole(e.target.value)}
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
               >
-                {AVAILABLE_ROLES.map(r => <option key={r.value} value={r.value}>{r.label} ({r.value})</option>)}
+                {availableRoles.map(r => <option key={r.value} value={r.value}>{r.label} ({r.value})</option>)}
               </select>
-              <p className="text-xs text-gray-500 mt-1">{AVAILABLE_ROLES.find(r => r.value === bindRole)?.desc}</p>
+              <p className="text-xs text-gray-500 mt-1">{availableRoles.find(r => r.value === bindRole)?.desc}</p>
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">资源类型（可选）</label>
@@ -275,7 +306,9 @@ export default function RoleBindingManager() {
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
               >
                 <option value="">不限（全局）</option>
-                <option value="kb">kb（知识库）</option>
+                {availableResourceTypes.map(rt => (
+                  <option key={rt} value={rt}>{rt}</option>
+                ))}
               </select>
             </div>
             <div>

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from models.role_definition import RoleDefinition
 from models.role_binding import RoleBinding
-from api.auth_routes import get_current_admin
+from api.auth_routes import get_current_admin, get_project_scope, ProjectScope, require_platform_permission
 from schemas.responses import Principal
 
 router = APIRouter(prefix="/api/v1/roles", tags=["admin-roles"])
@@ -29,6 +29,7 @@ class RoleDefOut(BaseModel):
     is_keycloak_role: bool = False  # Keycloak 身份角色（user/system_admin）
     permissions: list[str] = []
     binding_count: int = 0
+    project_id: str | None = None   # NULL=平台级角色，否则为项目级角色
     created_at: str = ""
 
 
@@ -41,6 +42,7 @@ class RoleDetailOut(BaseModel):
     is_keycloak_role: bool = False
     permissions: list[str] = []
     binding_count: int = 0
+    project_id: str | None = None
     created_at: str = ""
 
 
@@ -53,6 +55,7 @@ class CreateRoleRequest(BaseModel):
     description: str = Field("", max_length=512)
     parent_keycloak_roles: list[str] = Field(default=["user"])
     permissions: list[str] = Field(default=[], description="角色权限列表: ['kb:read', 'doc:view', ...]")
+    project_id: str | None = Field(None, description="所属项目 ID（NULL=平台级角色）")
 
 
 # ── 端点 ──
@@ -60,11 +63,39 @@ class CreateRoleRequest(BaseModel):
 
 @router.get("/definitions", response_model=list[RoleDefOut])
 async def list_role_definitions(
+    project_id: str | None = Query(None, description="按项目 ID 过滤"),
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("role_mgmt", "platform:read")),
 ) -> list[RoleDefOut]:
-    """获取所有角色定义列表（含绑定计数）。需要管理员认证。"""
-    stmt = select(RoleDefinition).order_by(RoleDefinition.name)
+    """获取所有角色定义列表（含绑定计数）。需要管理员认证。
+
+    按管理员项目范围自动过滤角色定义。
+    project_id=NULL（平台级角色）始终可见。
+    """
+    from sqlalchemy import or_
+
+    stmt = select(RoleDefinition)
+
+    # 项目范围过滤
+    if project_id:
+        stmt = stmt.where(
+            or_(
+                RoleDefinition.project_id == project_id,
+                RoleDefinition.project_id.is_(None),  # 平台级角色始终可见
+            )
+        )
+    elif not scope.is_platform_admin and scope.project_ids is not None:
+        if scope.project_ids:
+            stmt = stmt.where(
+                or_(
+                    RoleDefinition.project_id.in_(scope.project_ids),
+                    RoleDefinition.project_id.is_(None),
+                )
+            )
+
+    stmt = stmt.order_by(RoleDefinition.name)
     result = await db.execute(stmt)
     roles = result.scalars().all()
 
@@ -108,6 +139,7 @@ async def list_role_definitions(
                 else cerbos_perms.get(r.name, [])
             ),
             binding_count=binding_counts.get(r.name, 0),
+            project_id=r.project_id,
             created_at=r.created_at.isoformat() if r.created_at else "",
         )
         for r in roles
@@ -161,6 +193,7 @@ async def get_role_definition(
         is_keycloak_role=(r.name in ("user", "system_admin")),
         permissions=permissions,
         binding_count=binding_count,
+        project_id=r.project_id,
         created_at=r.created_at.isoformat() if r.created_at else "",
     )
 
@@ -170,11 +203,19 @@ async def create_role_definition(
     body: CreateRoleRequest,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("role_mgmt", "platform:write")),
 ) -> RoleDefOut:
     """创建自定义角色（需 system_admin 权限）。
 
     同时写入 Cerbos YAML 策略文件，使角色在 Cerbos 判定中生效。
+    project_id=NULL → 平台级角色（所有项目共享）
+    project_id 指定 → 仅该项目可见的角色
     """
+    # 验证项目访问权限
+    if body.project_id and not scope.can_access(body.project_id):
+        raise HTTPException(status_code=403, detail=f"No access to project '{body.project_id}'")
+
     # 检查是否已存在
     existing = await db.execute(
         select(RoleDefinition).where(RoleDefinition.name == body.name)
@@ -192,6 +233,7 @@ async def create_role_definition(
         parent_keycloak_roles=body.parent_keycloak_roles,
         permissions=permissions,
         is_system=False,
+        project_id=body.project_id,  # NULL=平台级，否则项目级
     )
     db.add(rd)
     await db.commit()
@@ -220,17 +262,15 @@ async def create_role_definition(
         is_keycloak_role=False,
         permissions=list(rd.permissions) if rd.permissions else [],
         binding_count=0,
+        project_id=rd.project_id,
         created_at=rd.created_at.isoformat() if rd.created_at else "",
     )
 
 
 def _cleanup_cerbos_yaml_for_role(name: str) -> None:
     """删除角色时清理对应的 Cerbos YAML 文件。"""
-    import os as _os, re as _re
-    policies_dir = _os.getenv(
-        "CERBOS_POLICIES_DIR",
-        "/home/mfkcel/proj_rag_dev/cerbos/policies",
-    )
+    from app.config import get_cerbos_policies_dir
+    policies_dir = str(get_cerbos_policies_dir())
 
     # 清理 derived_roles YAML 中的条目
     dr_path = _os.path.join(policies_dir, "derived_roles", "custom_roles.yaml")
@@ -259,10 +299,8 @@ def _write_cerbos_yaml_for_role(
     """为自定义角色生成 Cerbos YAML 策略文件。"""
     import os as _os
 
-    policies_dir = _os.getenv(
-        "CERBOS_POLICIES_DIR",
-        "/home/mfkcel/proj_rag_dev/cerbos/policies",
-    )
+    from app.config import get_cerbos_policies_dir
+    policies_dir = str(get_cerbos_policies_dir())
 
     # ── 1. Derived roles ──
     dr_dir = _os.path.join(policies_dir, "derived_roles")
@@ -378,15 +416,17 @@ async def delete_role_definition(
 
 @router.get("/permissions", response_model=PermissionMatrixOut)
 async def get_permissions_matrix(
+    project_id: str | None = Query(None, description="项目 ID，不传则返回全部"),
     admin: Principal = Depends(get_current_admin),
 ) -> PermissionMatrixOut:
-    """获取完整的角色-权限矩阵（从 Cerbos 策略 YAML 解析）。需要管理员认证。
+    """获取角色-权限矩阵（从 Cerbos 策略 YAML 解析）。需要管理员认证。
 
-    只读视图。仅包含权限角色（Cerbos 派生角色 + 自定义角色），
-    不包含 Keycloak 身份角色（user / system_admin）。
+    - project_id 指定 → 仅返回该项目的 Cerbos 派生角色
+    - project_id 不传 → 返回全部项目
+    仅包含 Cerbos 派生角色，不含 Keycloak 身份角色。
     """
     from services.cerbos_policy_parser import parse_permissions_matrix
-    matrix = parse_permissions_matrix()
+    matrix = parse_permissions_matrix(project_id=project_id if project_id else None)
     # 过滤掉 Keycloak 身份角色
     matrix["roles"] = [r for r in matrix["roles"] if r.get("source") != "keycloak"]
     return PermissionMatrixOut(**matrix)

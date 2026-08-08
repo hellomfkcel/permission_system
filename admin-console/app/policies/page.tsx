@@ -9,8 +9,9 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import api from "@/lib/api";
+import { useAuthStore } from "@/stores/useAuthStore";
 import { useToast } from "@/components/shared/Toast";
 
 interface PolicyEntry {
@@ -27,6 +28,8 @@ interface VersionEntry {
 }
 
 export default function PoliciesPage() {
+  const { currentProjectId } = useAuthStore();
+  const isPlatformMode = !currentProjectId || currentProjectId === "__all__";
   const { showToast: toast } = useToast();
   const toastError = (msg: string) => toast("error", msg);
   const [policies, setPolicies] = useState<PolicyEntry[]>([]);
@@ -48,6 +51,13 @@ export default function PoliciesPage() {
   // 新建策略（替代原生 prompt）
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [newPolicyPath, setNewPolicyPath] = useState("");
+
+  // 上传策略文件
+  const [showUploadDialog, setShowUploadDialog] = useState(false);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadSubpath, setUploadSubpath] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // P2-6: 部署状态
   const [deployStatus, setDeployStatus] = useState<{status: string; policies_count: number; cerbos_version: string; message: string} | null>(null);
@@ -75,7 +85,9 @@ export default function PoliciesPage() {
   const loadPolicies = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/api/v1/policies");
+      const params: Record<string, string> = {};
+      if (!isPlatformMode) params.project_id = currentProjectId;
+      const res = await api.get("/api/v1/policies", { params });
       const all: PolicyEntry[] = res.data;
       // 过滤掉 .versions/ 目录下的快照文件
       const filtered = all.filter((p) => !p.path.startsWith(".versions/"));
@@ -90,7 +102,7 @@ export default function PoliciesPage() {
 
   useEffect(() => {
     loadPolicies();
-  }, []);
+  }, [currentProjectId]);
 
   // ── 查看策略 YAML ──
   const viewPolicy = (policy: PolicyEntry) => {
@@ -118,10 +130,12 @@ export default function PoliciesPage() {
     if (!activePolicy) return;
     setSaving(true);
     try {
+      const params: Record<string, string> = {};
+      if (!isPlatformMode && currentProjectId) params.project_id = currentProjectId;
       await api.put(`/api/v1/policies/${encodeURIComponent(activePolicy.path)}`, {
         yaml_content: editContent,
         message: editingMessage || undefined,
-      });
+      }, { params });
       setYamlContent(editContent);
       setEditMode(false);
       // 重新加载列表刷新版本
@@ -192,16 +206,47 @@ export default function PoliciesPage() {
     const path = newPolicyPath.trim();
     const name = path.split("/").pop()?.replace(/\.ya?ml$/, "") || path;
     try {
+      const params: Record<string, string> = {};
+      if (!isPlatformMode && currentProjectId) params.project_id = currentProjectId;
       await api.put(`/api/v1/policies/${encodeURIComponent(path)}`, {
         yaml_content: `apiVersion: api.cerbos.dev/v1\n# ${name}\n`,
         message: "创建新策略",
-      });
+      }, { params });
       await loadPolicies();
       setShowCreateDialog(false);
       setNewPolicyPath("");
     } catch (e: unknown) {
       const err = e as { response?: { data?: { detail?: string } }; message?: string };
       toastError(`创建失败: ${err?.response?.data?.detail || err.message}`);
+    }
+  };
+
+  // ── 上传策略文件 ──
+  const handleUpload = async () => {
+    if (!uploadFile) return;
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", uploadFile);
+      formData.append("project_id", isPlatformMode ? "" : (currentProjectId || ""));
+      if (uploadSubpath.trim()) {
+        formData.append("policy_subpath", uploadSubpath.trim());
+      }
+      formData.append("message", `上传策略文件: ${uploadFile.name}`);
+
+      await api.post("/api/v1/policies/upload", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      toast("success", `策略文件 "${uploadFile.name}" 上传成功`);
+      setShowUploadDialog(false);
+      setUploadFile(null);
+      setUploadSubpath("");
+      await loadPolicies();
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } }; message?: string };
+      toastError(`上传失败: ${err?.response?.data?.detail || err.message}`);
+    } finally {
+      setUploading(false);
     }
   };
 
@@ -250,6 +295,12 @@ export default function PoliciesPage() {
             )}
           </div>
           <button
+            onClick={() => setShowUploadDialog(true)}
+            className="text-sm bg-green-600 text-white px-3 py-1.5 rounded hover:bg-green-700"
+          >
+            📤 上传策略
+          </button>
+          <button
             onClick={() => setShowCreateDialog(true)}
             className="text-sm bg-blue-600 text-white px-3 py-1.5 rounded hover:bg-blue-700"
           >
@@ -273,6 +324,76 @@ export default function PoliciesPage() {
               <div className="flex justify-end gap-3">
                 <button onClick={() => setShowCreateDialog(false)} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">取消</button>
                 <button onClick={createPolicy} className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">创建</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 上传策略 Dialog */}
+        {showUploadDialog && (
+          <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => !uploading && setShowUploadDialog(false)}>
+            <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+              <h3 className="text-lg font-semibold mb-4">📤 上传策略文件</h3>
+              <p className="text-xs text-gray-500 mb-4">
+                上传到: <code className="bg-gray-100 px-1 rounded">cerbos/policies/{isPlatformMode ? "" : (currentProjectId || "")}</code>
+              </p>
+
+              {/* 文件选择 */}
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">选择 .yaml/.yml 文件</label>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".yaml,.yml"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0] || null;
+                    setUploadFile(f);
+                    if (f && !uploadSubpath) {
+                      // 默认子路径
+                      setUploadSubpath(`resource_policies/${f.name}`);
+                    }
+                  }}
+                  className="w-full border rounded-lg p-2 text-sm"
+                  disabled={uploading}
+                />
+                {uploadFile && (
+                  <p className="text-xs text-green-600 mt-1">已选择: {uploadFile.name} ({(uploadFile.size / 1024).toFixed(1)} KB)</p>
+                )}
+              </div>
+
+              {/* 目标路径 */}
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  目标路径（可选，留空自动推导）
+                </label>
+                <input
+                  type="text"
+                  value={uploadSubpath}
+                  onChange={(e) => setUploadSubpath(e.target.value)}
+                  placeholder="如 resource_policies/my_policy.yaml"
+                  className="w-full border rounded-lg px-3 py-2 text-sm"
+                  disabled={uploading}
+                />
+                <p className="text-xs text-gray-400 mt-1">
+                  留空时根据 YAML 内容自动推导: 含 derivedRoles → derived_roles/；否则 → resource_policies/
+                </p>
+              </div>
+
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => { setShowUploadDialog(false); setUploadFile(null); setUploadSubpath(""); }}
+                  disabled={uploading}
+                  className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleUpload}
+                  disabled={!uploadFile || uploading}
+                  className="px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                >
+                  {uploading ? "上传中..." : "上传"}
+                </button>
               </div>
             </div>
           </div>

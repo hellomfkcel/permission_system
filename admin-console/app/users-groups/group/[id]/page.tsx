@@ -9,7 +9,15 @@ import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import api from "@/lib/api";
 import PermissionTrace from "@/components/acl/PermissionTrace";
-import { ACTION_LABELS, type Action } from "@/lib/constants";
+function actionLabel(a: string): string {
+  const m: Record<string, string> = {
+    "kb:read": "读取KB", "kb:write": "写入KB", "kb:manage": "管理KB", "kb:grant": "授权KB",
+    "doc:view": "查看文档", "doc:download": "下载文档", "doc:retrieve": "检索文档",
+    "doc:unmount": "移除文档", "doc:purge": "删除文档", "doc:share": "分享文档",
+    "platform:read": "平台读取", "platform:write": "平台写入",
+  };
+  return m[a] || a;
+}
 
 interface ACLSummary {
   id: string;
@@ -74,7 +82,7 @@ export default function GroupDetailPage() {
               {aclEntries.map((entry, i) => (
                 <div key={i} className="flex items-center justify-between p-2 bg-gray-50 rounded text-sm">
                   <span>{entry.resource_type}/{entry.resource_id}</span>
-                  <span className="text-blue-600 font-medium">{ACTION_LABELS[entry.action as Action] || entry.action}</span>
+                  <span className="text-blue-600 font-medium">{actionLabel(entry.action)}</span>
                 </div>
               ))}
             </div>

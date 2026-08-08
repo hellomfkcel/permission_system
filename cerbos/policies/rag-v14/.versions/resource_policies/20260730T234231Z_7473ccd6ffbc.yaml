@@ -1,0 +1,14 @@
+apiVersion: api.cerbos.dev/v1
+# P2 version test
+resourcePolicy:
+  version: "p2-test"
+  resource: "kb"
+  importDerivedRoles:
+    - rag_roles
+  rules:
+    - actions: ["kb:read"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["kb_reader", "kb_writer", "kb_admin", "admin"]
+      condition:
+        match:
+          expr: request.resource.attr.retired == false

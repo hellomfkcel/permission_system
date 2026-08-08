@@ -15,10 +15,24 @@ const api = axios.create({
   },
 });
 
-// 请求拦截器：自动注入 JWT token + 过期检查
+// 请求拦截器：自动注入 JWT token + 过期检查 + 项目上下文
 api.interceptors.request.use((config) => {
   if (typeof window !== "undefined") {
     const token = localStorage.getItem("admin_token");
+    // 自动附加项目上下文（如果已选择具体项目且不是"平台管理"模式）
+    const currentProject = localStorage.getItem("admin_current_project");
+    // __all__ 或空字符串 = 平台管理模式，不自动注入 project_id
+    if (
+      currentProject &&
+      currentProject !== "__all__" &&
+      currentProject !== "" &&
+      !config.params?.project_id
+    ) {
+      if (!config.params) config.params = {};
+      if (!config.params.project_id) {
+        config.params.project_id = currentProject;
+      }
+    }
     if (token) {
       // JWT 过期检查（提前 5 分钟警告）
       try {

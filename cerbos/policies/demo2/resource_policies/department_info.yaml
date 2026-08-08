@@ -1,0 +1,26 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  resource: "oa_department_info"
+  version: "default"
+  importDerivedRoles:
+    - oa_roles
+  rules:
+    # 所有员工：查看部门基本信息
+    - actions: ["read"]
+      effect: EFFECT_ALLOW
+      roles: ["oa_employee"]
+
+    # 部门经理：修改本部门信息
+    - actions: ["update:own"]
+      effect: EFFECT_ALLOW
+      roles: ["oa_manager"]
+
+    # HR：管理所有部门信息
+    - actions: ["create", "update:all", "delete"]
+      effect: EFFECT_ALLOW
+      roles: ["oa_hr"]
+
+    # CEO：全部操作
+    - actions: ["create", "update:all", "delete"]
+      effect: EFFECT_ALLOW
+      roles: ["oa_ceo"]

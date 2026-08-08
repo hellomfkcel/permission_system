@@ -1,0 +1,53 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: "default"
+  resource: "document"
+  importDerivedRoles:
+    - rag_roles
+
+  rules:
+    - actions: ["doc:view"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["kb_reader", "kb_writer", "kb_admin", "admin"]
+      condition:
+        match:
+          expr: >
+            request.resource.attr.is_enabled == true &&
+            request.resource.attr.retired == false
+
+    - actions: ["doc:download"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["kb_reader", "kb_writer", "kb_admin", "admin"]
+      condition:
+        match:
+          expr: >
+            request.resource.attr.is_enabled == true &&
+            request.resource.attr.retired == false &&
+            request.resource.attr.allow_download == true
+
+    - actions: ["doc:retrieve"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["kb_reader", "kb_writer", "kb_admin", "admin"]
+      condition:
+        match:
+          expr: >
+            request.resource.attr.is_enabled == true &&
+            request.resource.attr.retired == false
+
+    - actions: ["doc:unmount"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["kb_writer", "kb_admin", "admin"]
+      condition:
+        match:
+          expr: request.resource.attr.retired == false
+
+    - actions: ["doc:purge"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["kb_admin", "admin"]
+      condition:
+        match:
+          expr: request.resource.attr.retired == false
+
+    - actions: ["doc:share"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["admin"]

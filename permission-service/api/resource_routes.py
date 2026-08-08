@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from models.resource import ResourceRegistry
-from api.auth_routes import get_current_admin
+from api.auth_routes import get_current_admin, get_project_scope, ProjectScope, require_platform_permission
 from schemas.responses import Principal
 from services.event_publisher import get_event_publisher
 
@@ -35,18 +35,30 @@ class ResourceOut(BaseModel):
 async def list_resources(
     type: str | None = Query(None, alias="type", description="资源类型: kb | document"),
     tenant_id: str | None = Query(None, description="租户 ID 过滤"),
+    project_id: str | None = Query(None, description="按项目 ID 过滤"),
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("resource_mgmt", "platform:read")),
 ) -> list[ResourceOut]:
     """列出已注册资源 — 供管理台资源管理页使用。需要管理员认证。
 
-    支持按 type、tenant_id 过滤，最多返回 500 条。
+    支持按 type、tenant_id、project_id 过滤，最多返回 500 条。
+    按管理员项目范围自动过滤。
     """
     conditions = []
     if type:
         conditions.append(ResourceRegistry.resource_type == type)
     if tenant_id:
         conditions.append(ResourceRegistry.tenant_id == tenant_id)
+
+    # 项目范围过滤
+    if project_id:
+        conditions.append(ResourceRegistry.project_id == project_id)
+    elif not scope.is_platform_admin:
+        scope_filter = scope.filter_condition(ResourceRegistry)
+        if scope_filter is not None:
+            conditions.append(scope_filter)
 
     stmt = (
         select(ResourceRegistry)
@@ -95,6 +107,7 @@ async def transfer_ownership(
     body: TransferOwnershipRequest,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    _perm: None = Depends(require_platform_permission("resource_mgmt", "platform:write")),
 ) -> TransferResult:
     """转移资源所有权（需要管理员认证）。
 
@@ -167,6 +180,7 @@ async def get_resource_owners(
     resource_id: str,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    _perm: None = Depends(require_platform_permission("resource_mgmt", "platform:read")),
 ) -> ResourceOwnerResponse:
     """查询资源所有者信息（管理台 API，需管理员认证）。
 

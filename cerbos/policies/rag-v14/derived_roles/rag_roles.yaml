@@ -1,0 +1,39 @@
+apiVersion: api.cerbos.dev/v1
+derivedRoles:
+  name: rag_roles
+  definitions:
+    - name: kb_reader
+      parentRoles: ["user"]
+      condition:
+        match:
+          expr: >
+            has(request.principal.attr.granted_actions) &&
+            request.principal.attr.granted_actions[
+              request.resource.kind == "kb" ? request.resource.id : request.resource.attr.kb_id
+            ].exists(x, x == "read")
+
+    - name: kb_writer
+      parentRoles: ["user"]
+      condition:
+        match:
+          expr: >
+            has(request.principal.attr.granted_actions) &&
+            request.principal.attr.granted_actions[
+              request.resource.kind == "kb" ? request.resource.id : request.resource.attr.kb_id
+            ].exists(x, x == "write")
+
+    - name: kb_admin
+      parentRoles: ["user"]
+      condition:
+        match:
+          expr: >
+            has(request.principal.attr.granted_actions) &&
+            request.principal.attr.granted_actions[
+              request.resource.kind == "kb" ? request.resource.id : request.resource.attr.kb_id
+            ].exists(x, x == "manage")
+
+    - name: admin
+      parentRoles: ["system_admin"]
+      condition:
+        match:
+          expr: "true"

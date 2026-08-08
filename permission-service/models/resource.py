@@ -6,7 +6,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Boolean, DateTime, func, UniqueConstraint
+from sqlalchemy import String, Boolean, DateTime, func, UniqueConstraint, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -18,6 +18,10 @@ class ResourceRegistry(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id"), nullable=False,
+        comment="所属项目 ID",
     )
     resource_type: Mapped[str] = mapped_column(
         String(64), nullable=False, comment="kb|document|directory"
@@ -53,4 +57,9 @@ class ResourceRegistry(Base):
 
     __table_args__ = (
         UniqueConstraint("resource_type", "resource_id", name="uq_resource_type_id"),
+        Index(
+            "idx_resource_project",
+            "project_id",
+            postgresql_where="NOT retired",
+        ),
     )

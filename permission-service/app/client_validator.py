@@ -22,23 +22,95 @@ _settings = Settings()
 
 logger = structlog.get_logger(__name__)
 
-# ── 准入矩阵（设计依据 §6A.1）──
-# 每个端点路径前缀 → 允许的 client_id 集合
-# /api/v1/* 管理台端点由 Bearer token (get_current_admin) 保护，
-# 不强制 X-Client-Id 校验。
-ALLOWED_CLIENTS: dict[str, set[str]] = {
-    # 决策面 — interactive-backend 调用
-    "/v1/check":       {"interactive-backend"},
-    # 投影面 — retrieval 调用（prefilter），ingest 调用（visibility）
-    "/v1/prefilter":   {"retrieval"},
-    "/v1/visibility":  {"ingest"},
-    # 上下文 — interactive-backend 调用
-    "/v1/context":     {"interactive-backend"},
-    # 生命周期端口 — RAG B-DOC 通过 P-AUTHC 调用
-    "/v1/resources":   {"interactive-backend"},
-    # 检索过滤 — retrieval 调用
-    "/v1/filter":      {"retrieval"},
-}
+# ── 客户端缓存（Phase 1: 替代硬编码 ALLOWED_CLIENTS）──
+# 从 project_clients 表加载，60s TTL 内存缓存。
+# {client_id: project_id}
+_client_cache: dict[str, str] = {}
+_client_cache_ts: float = 0.0
+_CLIENT_CACHE_TTL = 60.0  # 秒
+
+# ── API Key 缓存（Phase 1: 替代单全局 SERVICE_API_KEY）──
+# 从 project_api_keys 表加载，60s TTL。
+# {api_key_hash: project_id}
+_api_key_cache: dict[str, str] = {}
+_api_key_cache_ts: float = 0.0
+
+
+async def _refresh_client_cache() -> dict[str, str]:
+    """从 project_clients 表刷新客户端缓存。"""
+    global _client_cache, _client_cache_ts
+    import time as _t
+    from app.database import async_session
+    from sqlalchemy import select
+    from models.project import ProjectClient
+
+    now = _t.monotonic()
+    if _client_cache and (now - _client_cache_ts) < _CLIENT_CACHE_TTL:
+        return _client_cache
+
+    async with async_session() as db:
+        result = await db.execute(
+            select(ProjectClient.client_id, ProjectClient.project_id)
+        )
+        _client_cache = {row.client_id: row.project_id for row in result}
+        _client_cache_ts = now
+    return _client_cache
+
+
+async def _refresh_api_key_cache() -> dict[str, str]:
+    """从 project_api_keys 表刷新 API Key 缓存。
+
+    Returns:
+        {key_hash: project_id}，仅包含未吊销的 key。
+    """
+    global _api_key_cache, _api_key_cache_ts
+    import time as _t
+    from app.database import async_session
+    from sqlalchemy import select
+    from models.project import ProjectApiKey
+
+    now = _t.monotonic()
+    if _api_key_cache and (now - _api_key_cache_ts) < _CLIENT_CACHE_TTL:
+        return _api_key_cache
+
+    async with async_session() as db:
+        result = await db.execute(
+            select(ProjectApiKey.key_hash, ProjectApiKey.project_id)
+            .where(ProjectApiKey.revoked == False)  # noqa: E712
+        )
+        _api_key_cache = {row.key_hash: row.project_id for row in result}
+        _api_key_cache_ts = now
+    return _api_key_cache
+
+
+def invalidate_client_cache() -> None:
+    """主动失效客户端缓存（project_clients 变更后调用）。"""
+    global _client_cache, _client_cache_ts
+    _client_cache.clear()
+    _client_cache_ts = 0.0
+
+
+def invalidate_api_key_cache() -> None:
+    """主动失效 API Key 缓存（project_api_keys 变更后调用）。"""
+    global _api_key_cache, _api_key_cache_ts
+    _api_key_cache.clear()
+    _api_key_cache_ts = 0.0
+
+
+async def validate_api_key(api_key: str) -> str | None:
+    """校验 API Key 并返回对应的 project_id。
+
+    替代原来 config.py 中的单全局 service_api_key 校验。
+
+    Returns:
+        匹配的 project_id，若无效则返回 None。
+    """
+    import hashlib
+    if not api_key:
+        return None
+    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    cache = await _refresh_api_key_cache()
+    return cache.get(key_hash)
 
 # ── Bearer Auth 路径（管理台 API）—— 不强制 X-Client-Id ──
 # 这些端点通过 get_current_admin 依赖注入验证 Bearer token
@@ -60,11 +132,16 @@ def _get_client_id(request: Request) -> str | None:
     return request.headers.get("X-Client-Id") or request.headers.get("x-client-id")
 
 
-def validate_client_id(path: str, client_id: str | None) -> None:
-    """校验 client_id 是否在端点允许列表中。
+async def validate_client_id(path: str, client_id: str | None) -> str | None:
+    """校验 client_id 是否在 project_clients 表中注册。
+
+    Phase 1: 替代硬编码 ALLOWED_CLIENTS，改为从 DB 查询 + 缓存。
+
+    Returns:
+        匹配到的 project_id，用于注入 request.state.project_id。
 
     Raises:
-        HTTPException(403): client_id 不在准入矩阵中。
+        HTTPException(403): client_id 不在注册表中。
     """
     if client_id is None:
         raise HTTPException(
@@ -75,31 +152,25 @@ def validate_client_id(path: str, client_id: str | None) -> None:
             },
         )
 
-    # 查找匹配的路径前缀
-    for prefix, allowed in ALLOWED_CLIENTS.items():
-        if path.startswith(prefix):
-            if client_id in allowed:
-                return  # 校验通过
-            # client_id 不在允许列表中
-            logger.warning(
-                "client_id_rejected",
-                path=path,
-                client_id=client_id,
-                allowed=sorted(allowed),
-            )
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error": "invalid_client_id",
-                    "message": (
-                        f"Client-ID '{client_id}' is not authorized for {path}. "
-                        f"Allowed: {sorted(allowed)}"
-                    ),
-                },
-            )
+    cache = await _refresh_client_cache()
+    if client_id in cache:
+        return cache[client_id]
 
-    # 路径不在准入矩阵中 → 允许通过（管理台 API 等由 Bearer token 保护）
-    return
+    logger.warning(
+        "client_id_rejected",
+        path=path,
+        client_id=client_id,
+    )
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "error": "invalid_client_id",
+            "message": (
+                f"Client-ID '{client_id}' is not registered. "
+                "Register it in the project management page."
+            ),
+        },
+    )
 
 
 class ClientIdValidationMiddleware(BaseHTTPMiddleware):
@@ -122,19 +193,15 @@ class ClientIdValidationMiddleware(BaseHTTPMiddleware):
         if request.method == "OPTIONS":
             return await call_next(request)
 
-        # ── 服务间认证：X-Api-Key（v1 端点，可选） ──
-        api_key_required = (
-            _settings.service_api_key
-            and path.startswith("/v1/")
-            and not path.startswith("/api/v1/")
-        )
-        if api_key_required:
+        # ── 服务间认证：X-Api-Key（v1 端点） ──
+        # Phase 1: 从 project_api_keys 表校验，替代单全局 service_api_key。
+        if path.startswith("/v1/") and not path.startswith("/api/v1/"):
             api_key = (
                 request.headers.get("X-Api-Key")
                 or request.headers.get("x-api-key")
             )
-            # P0-2 修复：使用模块级 _settings 单例（确保 Docker/K8s secret 文件加载的值生效）
-            if api_key != _settings.service_api_key:
+            project_id_from_key = await validate_api_key(api_key or "")
+            if project_id_from_key is None:
                 logger.warning(
                     "api_key_rejected",
                     path=path,
@@ -147,6 +214,8 @@ class ClientIdValidationMiddleware(BaseHTTPMiddleware):
                         "message": "Invalid or missing X-Api-Key for service-to-service endpoint.",
                     },
                 )
+            # 注入 project_id 到 request.state
+            request.state.project_id = project_id_from_key
 
         # 管理台 Bearer Auth 路径跳过 X-Client-Id 校验
         for bp in BEARER_AUTH_PATHS:
@@ -155,42 +224,36 @@ class ClientIdValidationMiddleware(BaseHTTPMiddleware):
 
         client_id = _get_client_id(request)
 
-        # 查找匹配的路径前缀并校验 client_id
-        for prefix, allowed in ALLOWED_CLIENTS.items():
-            if path.startswith(prefix):
-                if client_id is None:
-                    logger.warning(
-                        "client_id_missing",
-                        path=path,
-                        method=request.method,
-                    )
-                    return JSONResponse(
-                        status_code=403,
-                        content={
-                            "error": "missing_client_id",
-                            "message": (
-                                f"X-Client-Id header is required for {path}. "
-                                f"Allowed clients: {sorted(allowed)}"
-                            ),
-                        },
-                    )
-                if client_id not in allowed:
-                    logger.warning(
-                        "client_id_rejected",
-                        path=path,
-                        client_id=client_id,
-                        allowed=sorted(allowed),
-                    )
-                    return JSONResponse(
-                        status_code=403,
-                        content={
-                            "error": "invalid_client_id",
-                            "message": (
-                                f"Client-ID '{client_id}' is not authorized for {path}. "
-                                f"Allowed: {sorted(allowed)}"
-                            ),
-                        },
-                    )
-                break  # 找到匹配的 prefix 且校验通过
+        # Phase 1: 从 project_clients 表校验 client_id（替代硬编码 ALLOWED_CLIENTS）
+        try:
+            project_id_from_client = await validate_client_id(path, client_id)
+        except HTTPException:
+            raise  # 重新抛出 403
+
+        # ★ P4 修复：API key 和 client_id 必须属于同一项目
+        # 防止跨项目混用：RAG 的 API key + demo 的 client_id 必须被拒绝
+        project_id_from_key = getattr(request.state, "project_id", None)
+        if project_id_from_key and project_id_from_key != project_id_from_client:
+            logger.warning(
+                "project_mismatch",
+                path=path,
+                key_project=project_id_from_key,
+                client_project=project_id_from_client,
+                client_id=client_id,
+            )
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "project_mismatch",
+                    "message": (
+                        f"API key belongs to project '{project_id_from_key}' "
+                        f"but client_id '{client_id}' belongs to project '{project_id_from_client}'. "
+                        "They must belong to the same project."
+                    ),
+                },
+            )
+
+        if not project_id_from_key:
+            request.state.project_id = project_id_from_client
 
         return await call_next(request)

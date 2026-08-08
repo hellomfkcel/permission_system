@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from models.role_binding import RoleBinding
 from services.event_publisher import get_event_publisher
-from api.auth_routes import get_current_admin
+from api.auth_routes import get_current_admin, get_project_scope, ProjectScope, require_platform_permission
 from schemas.responses import Principal
 
 router = APIRouter(prefix="/api/v1/roles", tags=["admin-roles"])
@@ -29,6 +29,7 @@ class BindRoleRequest(BaseModel):
     resource_type: str | None = Field(None)
     resource_id: str | None = Field(None)
     granted_by: str
+    project_id: str = Field(..., description="所属项目 ID")
 
 
 class UnbindRoleRequest(BaseModel):
@@ -40,6 +41,7 @@ class UnbindRoleRequest(BaseModel):
 
 class RoleBindingOut(BaseModel):
     id: str
+    project_id: str = ""                    # 所属项目 ID
     tenant_id: str
     principal: str
     role: str
@@ -58,8 +60,14 @@ async def bind_role(
     body: BindRoleRequest,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("role_mgmt", "platform:write")),
 ) -> dict:
     """绑定角色（需要管理员认证）。"""
+    # 验证项目访问权限
+    if not scope.can_access(body.project_id):
+        raise HTTPException(status_code=403, detail=f"No access to project '{body.project_id}'")
+
     # 检查重复
     stmt = select(RoleBinding).where(
         RoleBinding.principal == body.principal,
@@ -79,6 +87,7 @@ async def bind_role(
     new_id = uuid.uuid4()
     binding = RoleBinding(
         id=new_id,
+        project_id=body.project_id,
         tenant_id=body.tenant_id,
         principal=body.principal,
         role=body.role,
@@ -125,6 +134,8 @@ async def unbind_role(
     body: UnbindRoleRequest,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("role_mgmt", "platform:write")),
 ) -> dict:
     """解除角色绑定（需要管理员认证）。"""
     stmt = select(RoleBinding).where(
@@ -142,6 +153,10 @@ async def unbind_role(
 
     if not binding:
         raise HTTPException(status_code=404, detail="binding not found")
+
+    # 验证项目访问权限
+    if not scope.can_access(binding.project_id):
+        raise HTTPException(status_code=403, detail=f"No access to project '{binding.project_id}'")
 
     binding.revoked = True
 
@@ -182,10 +197,13 @@ async def list_bindings(
     principal: str | None = Query(None),
     resource_type: str | None = Query(None),
     resource_id: str | None = Query(None),
+    project_id: str | None = Query(None, description="按项目 ID 过滤"),
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("role_mgmt", "platform:read")),
 ) -> list[RoleBindingOut]:
-    """查询角色绑定列表（需要管理员认证）。"""
+    """查询角色绑定列表（需要管理员认证）。按管理员项目范围自动过滤。"""
     conditions = [RoleBinding.revoked == False]  # noqa: E712
     if principal:
         conditions.append(RoleBinding.principal == principal)
@@ -194,6 +212,19 @@ async def list_bindings(
     if resource_id:
         conditions.append(RoleBinding.resource_id == resource_id)
 
+    # 项目范围过滤 — 平台级条目（project_id=NULL）始终对所有管理员可见
+    from sqlalchemy import or_
+    if project_id:
+        conditions.append(
+            or_(RoleBinding.project_id == project_id, RoleBinding.project_id.is_(None))
+        )
+    elif not scope.is_platform_admin:
+        scope_filter = scope.filter_condition(RoleBinding)
+        if scope_filter is not None:
+            conditions.append(
+                or_(scope_filter, RoleBinding.project_id.is_(None))
+            )
+
     stmt = select(RoleBinding).where(*conditions).order_by(RoleBinding.granted_at.desc())
     result = await db.execute(stmt)
     bindings = result.scalars().all()
@@ -201,6 +232,7 @@ async def list_bindings(
     return [
         RoleBindingOut(
             id=str(b.id),
+            project_id=b.project_id or "",
             tenant_id=b.tenant_id,
             principal=b.principal,
             role=b.role,

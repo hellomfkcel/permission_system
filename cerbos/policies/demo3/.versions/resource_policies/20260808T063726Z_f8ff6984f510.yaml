@@ -1,0 +1,16 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  resource: "demo3_document"
+  version: "default"
+  importDerivedRoles:
+    - demo3_roles
+  rules:
+    - actions: ["read"]
+      effect: EFFECT_ALLOW
+      roles: ["viewer"]
+    - actions: ["create", "update"]
+      effect: EFFECT_ALLOW
+      roles: ["editor"]
+    - actions: ["delete"]
+      effect: EFFECT_ALLOW
+      roles: ["editor"]

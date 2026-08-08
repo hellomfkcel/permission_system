@@ -3,6 +3,8 @@
 设计依据：docs/外部系统设计.md §2.2 技术选型 + 实施方案 §0.3 环境变量一览。
 """
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings
 
 
@@ -17,6 +19,10 @@ class Settings(BaseSettings):
 
     # ── Cerbos PDP ──
     cerbos_pdp_url: str = "http://localhost:13592"
+
+    # Cerbos 策略文件目录 — 相对于本项目的 cerbos/policies/
+    # 可通过环境变量 CERBOS_POLICIES_DIR 覆盖（如 Docker 部署中映射到容器内路径）
+    cerbos_policies_dir: str = ""
 
     # ── Redis ──
     # 默认 URL（开发环境无密码）。
@@ -142,12 +148,31 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
+
+def get_cerbos_policies_dir() -> Path:
+    """解析 Cerbos 策略文件目录。
+
+    优先级:
+    1. 环境变量 CERBOS_POLICIES_DIR
+    2. settings.cerbos_policies_dir
+    3. <permission-service>/../cerbos/policies/（项目内相对路径）
+
+    不硬编码任何特定项目的绝对路径。
+    """
+    import os
+    env_val = os.getenv("CERBOS_POLICIES_DIR", "")
+    if env_val:
+        return Path(env_val)
+    if settings.cerbos_policies_dir:
+        return Path(settings.cerbos_policies_dir)
+    return Path(__file__).parent.parent.parent / "cerbos" / "policies"
+
+
 # ── Secret file loading ──
 # Docker secrets / K8s Secret 挂载为文件，优先于环境变量中的明文值。
 # 设计依据：P2-3 生产安全 — 凭据禁止在 .env 中明文存放。
 
 if settings.keycloak_client_secret_file:
-    from pathlib import Path
     _secret_path = Path(settings.keycloak_client_secret_file)
     if _secret_path.is_file():
         settings.keycloak_client_secret = _secret_path.read_text().strip()

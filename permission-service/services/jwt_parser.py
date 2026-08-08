@@ -138,7 +138,10 @@ def parse_principal(credential: str) -> Principal:
         if token_iss and len(allowed) > 1 and token_iss not in allowed:
             raise JoseJWTError(f"Issuer '{token_iss}' not in allowed list: {allowed}")
 
-    user_id: str = claims.get("sub", "unknown")
+    # 优先使用 preferred_username（可读的用户名），回退到 sub（可能是 UUID）
+    # Keycloak SSO: sub = UUID, preferred_username = "alice"
+    # dev-login: sub = "alice" (手动设置)
+    user_id: str = claims.get("preferred_username") or claims.get("sub", "unknown")
     tenant_id: str = claims.get("tenant", claims.get("tenant_id", ""))
     # 兼容两种 JWT 格式:
     #   生产模式 (Keycloak): roles 在 realm_access.roles 中

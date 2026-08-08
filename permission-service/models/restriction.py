@@ -6,7 +6,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Boolean, DateTime, func, CheckConstraint, Text
+from sqlalchemy import String, Boolean, DateTime, func, CheckConstraint, Text, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -18,6 +18,10 @@ class Restriction(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id"), nullable=False,
+        comment="所属项目 ID",
     )
     tenant_id: Mapped[str] = mapped_column(String(255), nullable=False)
     restriction_type: Mapped[str] = mapped_column(
@@ -48,5 +52,10 @@ class Restriction(Base):
             "(restriction_type = 'subject_ban' AND principal IS NOT NULL) OR "
             "(restriction_type = 'resource_restriction' AND resource_type IS NOT NULL)",
             name="ck_restriction_type",
+        ),
+        Index(
+            "idx_restriction_project",
+            "project_id",
+            postgresql_where="NOT removed",
         ),
     )

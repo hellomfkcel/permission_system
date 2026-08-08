@@ -1,0 +1,26 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  resource: "oa_performance_review"
+  version: "default"
+  importDerivedRoles:
+    - oa_roles
+  rules:
+    # 普通员工：查看自己的绩效
+    - actions: ["read:own"]
+      effect: EFFECT_ALLOW
+      roles: ["oa_employee"]
+
+    # 部门经理：创建/查看/更新本部门员工绩效
+    - actions: ["create", "read:department", "update:department"]
+      effect: EFFECT_ALLOW
+      roles: ["oa_manager"]
+
+    # HR：管理全公司绩效评估
+    - actions: ["create", "read:all", "update:all", "delete"]
+      effect: EFFECT_ALLOW
+      roles: ["oa_hr"]
+
+    # CEO：全部操作
+    - actions: ["read:all", "update:all", "delete"]
+      effect: EFFECT_ALLOW
+      roles: ["oa_ceo"]

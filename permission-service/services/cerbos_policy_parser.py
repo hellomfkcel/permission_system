@@ -15,11 +15,7 @@ from pathlib import Path
 import yaml
 
 
-# Cerbos 策略文件路径（从环境变量或默认值）
-_CERBOS_POLICIES_DIR = os.getenv(
-    "CERBOS_POLICIES_DIR",
-    "/home/mfkcel/proj_rag_dev/cerbos/policies",
-)
+# Cerbos 策略文件路径 — 由 get_cerbos_policies_dir() 统一解析，不再硬编码
 
 # ── 角色动作映射缓存 ──
 # 从 Cerbos YAML 解析得到的 {role_name: [action_strings]} 映射。
@@ -35,8 +31,11 @@ def _load_yaml(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def parse_permissions_matrix() -> dict:
-    """从 Cerbos 策略 YAML 文件解析完整的角色-权限矩阵。
+def parse_permissions_matrix(project_id: str | None = None) -> dict:
+    """从 Cerbos 策略 YAML 文件解析角色-权限矩阵。
+
+    Args:
+        project_id: 若指定，仅解析该项目的策略；若 None，解析全部项目。
 
     Returns:
         {
@@ -44,36 +43,61 @@ def parse_permissions_matrix() -> dict:
                 {
                     "name": "kb_reader",
                     "parent_keycloak_roles": ["user"],
-                    "permissions": ["kb:read", "doc:view", ...]
+                    "permissions": ["kb:read", "doc:view", ...],
+                    "project_id": "rag-v14",
                 },
                 ...
             ]
         }
     """
-    policies_dir = Path(_CERBOS_POLICIES_DIR)
+    from app.config import get_cerbos_policies_dir
+    policies_dir = get_cerbos_policies_dir()
     if not policies_dir.exists():
         return {"roles": []}
 
+    # 确定要搜索的子目录
+    if project_id:
+        search_roots = [policies_dir / project_id]
+    else:
+        search_roots = [d for d in policies_dir.iterdir() if d.is_dir() and d.name != ".versions"]
+
     # ── 1. 解析派生角色定义 ──
     derived_roles: dict[str, list[str]] = {}  # name → parentRoles
-    dr_path = policies_dir / "derived_roles" / "rag_roles.yaml"
-    if dr_path.exists():
-        dr_data = _load_yaml(str(dr_path))
-        for dr in dr_data.get("derivedRoles", {}).get("definitions", []):
-            derived_roles[dr["name"]] = dr.get("parentRoles", [])
+    role_to_project: dict[str, str] = {}       # role_name → project_id
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for dr_file in root.rglob("derived_roles/*.yaml"):
+            if ".versions" in dr_file.parts:
+                continue
+            try:
+                dr_data = _load_yaml(str(dr_file))
+                for dr in dr_data.get("derivedRoles", {}).get("definitions", []):
+                    derived_roles[dr["name"]] = dr.get("parentRoles", [])
+                    role_to_project[dr["name"]] = root.name
+            except Exception:
+                pass
 
     # ── 2. 解析资源策略：role → [actions] ──
     role_actions: dict[str, set[str]] = {}  # role → set of actions
-    rp_dir = policies_dir / "resource_policies"
-    if rp_dir.exists():
-        for yaml_file in rp_dir.glob("*.yaml"):
-            rp_data = _load_yaml(str(yaml_file))
-            for rule in rp_data.get("resourcePolicy", {}).get("rules", []):
-                actions = rule.get("actions", [])
-                for role in rule.get("derivedRoles", []):
-                    if role not in role_actions:
-                        role_actions[role] = set()
-                    role_actions[role].update(actions)
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for yaml_file in root.rglob("resource_policies/*.yaml"):
+            if ".versions" in yaml_file.parts:
+                continue
+            try:
+                rp_data = _load_yaml(str(yaml_file))
+                for rule in rp_data.get("resourcePolicy", {}).get("rules", []):
+                    actions = rule.get("actions", [])
+                    # Cerbos 策略中角色可以出现在 roles 或 derivedRoles 字段
+                    for role in rule.get("roles", []) + rule.get("derivedRoles", []):
+                        if role not in role_actions:
+                            role_actions[role] = set()
+                        role_actions[role].update(actions)
+                        role_to_project.setdefault(role, root.name)
+            except Exception:
+                pass
 
     # ── 3. 构建矩阵（Cerbos 派生角色）──
     roles_list = []
@@ -83,6 +107,7 @@ def parse_permissions_matrix() -> dict:
             "parent_keycloak_roles": derived_roles.get(name, []),
             "permissions": sorted(role_actions[name]),
             "source": "cerbos",
+            "project_id": role_to_project.get(name, ""),
         })
 
     # ── 4. 计算 Keycloak 身份角色的权限（union of derived roles）──
@@ -100,6 +125,7 @@ def parse_permissions_matrix() -> dict:
             "parent_keycloak_roles": [],
             "permissions": sorted(kc_role_perms[kc_name]),
             "source": "keycloak",
+            "project_id": "",
         })
 
     return {"roles": roles_list}

@@ -14,15 +14,30 @@ interface UserInfo {
   principals: string[];
 }
 
+interface ProjectInfo {
+  id: string;
+  name: string;
+  description: string;
+  status: string;
+}
+
 interface AuthState {
   token: string | null;
   user: UserInfo | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  /** 当前选中的项目 ID */
+  currentProjectId: string | null;
+  /** 可用的项目列表 */
+  availableProjects: ProjectInfo[];
   /** 初始化：从 localStorage 恢复会话 */
   initFromStorage: () => void;
   setAuth: (token: string, user: UserInfo) => void;
   logout: () => void;
+  /** 设置当前项目 */
+  setCurrentProject: (projectId: string) => void;
+  /** 加载可用项目列表 */
+  loadProjects: () => Promise<void>;
   /** 尝试 refresh token（仅在过期前 5 分钟触发） */
   tryRefreshToken: () => Promise<boolean>;
 }
@@ -49,6 +64,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   isAuthenticated: false,
   isLoading: true,
+  currentProjectId: null,
+  availableProjects: [],
 
   initFromStorage: () => {
     if (typeof window === "undefined") {
@@ -96,9 +113,50 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       localStorage.removeItem("admin_user");
       localStorage.removeItem("admin_refresh_token");
       localStorage.removeItem("admin_token_expires_at");
+      localStorage.removeItem("admin_current_project");
       document.cookie = "admin_session=; path=/; max-age=0";
     }
-    set({ token: null, user: null, isAuthenticated: false });
+    set({ token: null, user: null, isAuthenticated: false, currentProjectId: null, availableProjects: [] });
+  },
+
+  setCurrentProject: (projectId: string) => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("admin_current_project", projectId);
+    }
+    set({ currentProjectId: projectId });
+  },
+
+  loadProjects: async () => {
+    const { token } = get();
+    if (!token) return;
+    try {
+      const resp = await fetch(
+        `${process.env.NEXT_PUBLIC_PERMISSION_SERVICE_URL || "http://localhost:18080"}/api/v1/projects`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!resp.ok) return;
+      const projects: ProjectInfo[] = await resp.json();
+      const activeProjects = projects.filter(p => p.status === "active");
+
+      // Restore saved project selection or default to first
+      let savedProject = typeof window !== "undefined"
+        ? localStorage.getItem("admin_current_project")
+        : null;
+      if (savedProject && !activeProjects.find(p => p.id === savedProject)) {
+        savedProject = null; // Saved project no longer available
+      }
+      const defaultProject = savedProject || activeProjects[0]?.id || null;
+
+      set({
+        availableProjects: activeProjects,
+        currentProjectId: defaultProject,
+      });
+      if (defaultProject && typeof window !== "undefined") {
+        localStorage.setItem("admin_current_project", defaultProject);
+      }
+    } catch {
+      // Silently fail - project list is not critical for login
+    }
   },
 
   tryRefreshToken: async () => {

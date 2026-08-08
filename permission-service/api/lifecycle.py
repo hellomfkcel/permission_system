@@ -184,6 +184,7 @@ async def register_resource(
     new_id = uuid.uuid4()
     resource = ResourceRegistry(
         id=new_id,
+        project_id=body.project_id,
         resource_type=body.resource_type,
         resource_id=body.resource_id,
         name=body.name,  # 资源名称（KB 名称 / 文档文件名）
@@ -201,7 +202,7 @@ async def register_resource(
         resource_type=body.resource_type,
         resource_id=body.resource_id,
         event_type="RESOURCE_REGISTERED",
-        change_detail={"action": "resource_registered"},
+        change_detail={"action": "resource_registered", "project_id": body.project_id},
     )
     await db.commit()  # 资源注册 + change_log 原子提交
 
@@ -211,7 +212,7 @@ async def register_resource(
         body.resource_type, body.resource_id,
         event_type="RESOURCE_REGISTERED",
         kb_id=body.kb_id,
-        change_detail={"action": "resource_registered"},
+        change_detail={"action": "resource_registered", "project_id": body.project_id},
     )
 
     return LifecycleResponse(

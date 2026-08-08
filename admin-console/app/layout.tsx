@@ -6,8 +6,8 @@ import SidebarWrapper from "@/components/layout/SidebarWrapper";
 import { ToastProvider } from "@/components/shared/Toast";
 
 export const metadata: Metadata = {
-  title: "RAG 权限管理台",
-  description: "RAG v14 权限管理系统管理台",
+  title: "权限管理台",
+  description: "通用权限管理系统管理台",
 };
 
 export default function RootLayout({

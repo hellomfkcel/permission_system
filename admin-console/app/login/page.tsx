@@ -9,23 +9,20 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthStore } from "@/stores/useAuthStore";
 
-// 开发模式登录端点：优先使用权限服务自带的 dev-login，失败时回退到 RAG API
-const PERM_DEV_LOGIN = (process.env.NEXT_PUBLIC_PERMISSION_SERVICE_URL || "http://localhost:18080") + "/api/v1/auth/dev-login";
-const RAG_DEV_LOGIN = process.env.NEXT_PUBLIC_RAG_API_URL
-  ? `${process.env.NEXT_PUBLIC_RAG_API_URL}/api/v1/auth/dev-login`
-  : "http://localhost:8000/api/v1/auth/dev-login";
+// 开发模式登录端点
+const DEV_LOGIN_URL = (process.env.NEXT_PUBLIC_PERMISSION_SERVICE_URL || "http://localhost:18080") + "/api/v1/auth/dev-login";
 
-const KEYCLOAK_URL = process.env.NEXT_PUBLIC_KEYCLOAK_URL || "http://192.168.1.127:8080";
+const KEYCLOAK_URL = process.env.NEXT_PUBLIC_KEYCLOAK_URL || "http://localhost:8080";
 const KEYCLOAK_REALM = process.env.NEXT_PUBLIC_KEYCLOAK_REALM || "rag-v14";
 const KEYCLOAK_CLIENT_ID = process.env.NEXT_PUBLIC_KEYCLOAK_CLIENT_ID || "admin-console";
 const REDIRECT_URI =
   typeof window !== "undefined"
     ? `${window.location.origin}/auth/callback`
-    : "http://192.168.1.127:3002/auth/callback";
+    : "";
 
 export default function LoginPage() {
   const router = useRouter();
-  const { setAuth } = useAuthStore();
+  const { setAuth, loadProjects } = useAuthStore();
 
   // Dev mode state
   const [username, setUsername] = useState("admin");
@@ -46,21 +43,11 @@ export default function LoginPage() {
     setDevError("");
 
     try {
-      // 优先使用权限服务自带的 dev-login，失败时回退到 RAG dev-login
-      let resp = await fetch(PERM_DEV_LOGIN, {
+      const resp = await fetch(DEV_LOGIN_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: username.trim(), password, tenant: tenant.trim() }),
       });
-
-      // 回退到 RAG dev-login
-      if (!resp.ok) {
-        resp = await fetch(RAG_DEV_LOGIN, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username: username.trim(), password, tenant: tenant.trim() }),
-        });
-      }
 
       if (!resp.ok) {
         const errData = await resp.json().catch(() => ({}));
@@ -72,7 +59,7 @@ export default function LoginPage() {
       const user = {
         user_id: (data.user as Record<string, string>).id || username.trim(),
         tenant_id: (data.user as Record<string, string>).tenant_id || tenant.trim(),
-        roles: ((data.user as Record<string, string[]>).roles) || ["user"],
+        roles: ((data.user as Record<string, string[]>).roles) || [],
         groups: ((data.user as Record<string, string[]>).groups) || [],
         principals: [`user:${(data.user as Record<string, string>).id || username.trim()}`],
       };
@@ -83,6 +70,8 @@ export default function LoginPage() {
       document.cookie = `admin_session=1; path=/; max-age=86400; SameSite=Lax`;
 
       setAuth(token, user);
+      // Load available projects after login
+      setTimeout(() => loadProjects(), 100);
       router.push("/dashboard");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "登录失败";
@@ -112,7 +101,7 @@ export default function LoginPage() {
       <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-md">
         <h1 className="text-2xl font-bold mb-2 text-center">🔐 权限管理台</h1>
         <p className="text-sm text-gray-500 mb-6 text-center">
-          登录以管理 RAG v14 权限系统
+          登录以管理权限系统
         </p>
 
         {/* 开发模式 */}
@@ -140,7 +129,7 @@ export default function LoginPage() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 onKeyDown={handleDevKeyDown}
-                placeholder="开发模式密码"
+                placeholder="输入密码"
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
                 disabled={devLoading}
               />
@@ -167,7 +156,7 @@ export default function LoginPage() {
               disabled={devLoading}
               className="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium disabled:opacity-50"
             >
-              {devLoading ? "登录中..." : "开发模式登录（RAG dev-login）"}
+              {devLoading ? "登录中..." : "开发模式登录"}
             </button>
           </div>
         </div>

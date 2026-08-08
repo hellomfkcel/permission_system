@@ -1,17 +1,42 @@
-/** Dashboard — 权限概览统计 + 最近变更时间线 + 待处理告警（P1-7 补全） */
+/** Dashboard — 数据驱动的权限概览统计 + 最近变更时间线。
+
+平台模式：按 resource_type 动态展示全部项目的资源统计 + 项目总数。
+项目模式：按 resource_type 动态展示该项目的资源统计。
+
+所有统计来自后端 GROUP BY 查询，新增资源类型无需修改前端代码。
+*/
+
 "use client";
 
 import { useEffect, useState } from "react";
-import { FolderOpen, FileText, Users, Key, History, Ban, AlertTriangle, Clock } from "lucide-react";
+import {
+  FolderOpen, FileText, Users, Key, History, Ban,
+  AlertTriangle, Clock, Boxes, Shield, Globe,
+} from "lucide-react";
 import api from "@/lib/api";
+import { useAuthStore } from "@/stores/useAuthStore";
+
+// ── 数据驱动统计模型 ──
+
+interface ResourceStat {
+  resource_type: string;
+  label: string;
+  count: number;
+}
+
+interface RestrictionStat {
+  restriction_type: string;
+  label: string;
+  count: number;
+}
 
 interface DashboardStats {
-  kb_count: number;
-  document_count: number;
+  project_count: number;
+  resource_stats: ResourceStat[];
   user_count: number;
   acl_count: number;
+  restriction_stats: RestrictionStat[];
   recent_changes: number;
-  active_restrictions: number;
 }
 
 interface RecentChangeItem {
@@ -30,6 +55,32 @@ interface RecentChangesData {
   expired_acl_count: number;
 }
 
+// ── 资源类型 → 图标/颜色映射（按 resource_type 动态匹配）──
+
+const RESOURCE_ICONS: Record<string, React.ReactNode> = {
+  kb: <FolderOpen size={32} />,
+  document: <FileText size={32} />,
+  platform: <Shield size={32} />,
+};
+
+const RESOURCE_COLORS: Record<string, string> = {
+  kb: "text-blue-500",
+  document: "text-purple-500",
+  platform: "text-orange-500",
+};
+
+const RESTRICTION_ICONS: Record<string, React.ReactNode> = {
+  subject_ban: <Ban size={32} />,
+  resource_restriction: <AlertTriangle size={32} />,
+};
+
+const RESTRICTION_COLORS: Record<string, string> = {
+  subject_ban: "text-red-500",
+  resource_restriction: "text-yellow-500",
+};
+
+// ── 通用统计卡片组件 ──
+
 interface StatCardProps {
   title: string;
   value: string | number;
@@ -45,13 +96,17 @@ function StatCard({ title, value, icon, description, color }: StatCardProps) {
         <div>
           <p className="text-sm text-gray-500">{title}</p>
           <p className="text-3xl font-bold mt-1">{value}</p>
-          {description && <p className="text-xs text-gray-400 mt-1">{description}</p>}
+          {description && (
+            <p className="text-xs text-gray-400 mt-1">{description}</p>
+          )}
         </div>
         <div className={color || "text-blue-500"}>{icon}</div>
       </div>
     </div>
   );
 }
+
+// ── 事件标签 ──
 
 const EVENT_LABELS: Record<string, string> = {
   ACL_GRANTED: "权限授予",
@@ -83,19 +138,29 @@ function formatTime(isoString: string): string {
   }
 }
 
+// ══════════════════════════════════════════════════════════════
+
 export default function DashboardPage() {
+  const { currentProjectId } = useAuthStore();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [changesData, setChangesData] = useState<RecentChangesData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
+  const isPlatformMode =
+    !currentProjectId || currentProjectId === "__all__";
+
   const loadData = async () => {
     setLoading(true);
     setError("");
     try {
+      const params: Record<string, string> = {};
+      if (!isPlatformMode) {
+        params.project_id = currentProjectId;
+      }
       const [statsRes, changesRes] = await Promise.all([
-        api.get("/api/v1/auth/stats"),
-        api.get("/api/v1/auth/recent-changes"),
+        api.get<DashboardStats>("/api/v1/auth/stats", { params }),
+        api.get<RecentChangesData>("/api/v1/auth/recent-changes", { params }),
       ]);
       setStats(statsRes.data);
       setChangesData(changesRes.data);
@@ -108,12 +173,14 @@ export default function DashboardPage() {
 
   useEffect(() => {
     loadData();
-  }, []);
+  }, [currentProjectId]);
 
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">📊 Dashboard</h1>
+        <h1 className="text-2xl font-bold">
+          📊 {isPlatformMode ? "平台概览" : "项目概览"}
+        </h1>
         <button
           onClick={loadData}
           className="text-sm text-blue-600 hover:text-blue-800 transition-colors"
@@ -131,7 +198,10 @@ export default function DashboardPage() {
       {loading && !stats ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {[...Array(6)].map((_, i) => (
-            <div key={i} className="bg-white rounded-lg shadow p-6 animate-pulse">
+            <div
+              key={i}
+              className="bg-white rounded-lg shadow p-6 animate-pulse"
+            >
               <div className="h-4 bg-gray-200 rounded w-1/2 mb-3" />
               <div className="h-8 bg-gray-200 rounded w-1/3" />
             </div>
@@ -139,58 +209,99 @@ export default function DashboardPage() {
         </div>
       ) : (
         <>
-          {/* P1-7: 待处理告警面板 */}
-          {changesData && (changesData.expired_acl_count > 0 || changesData.orphan_acl_count > 0) && (
-            <div className="mb-6 space-y-2">
-              {changesData.expired_acl_count > 0 && (
-                <div className="bg-yellow-50 border border-yellow-200 rounded-lg px-4 py-3 flex items-center gap-3">
-                  <Clock size={18} className="text-yellow-600 flex-shrink-0" />
-                  <span className="text-sm text-yellow-800">
-                    <strong>{changesData.expired_acl_count}</strong> 条 ACL 已过期但未回收 — 建议清理
-                  </span>
-                </div>
-              )}
-              {changesData.orphan_acl_count > 0 && (
-                <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center gap-3">
-                  <AlertTriangle size={18} className="text-red-600 flex-shrink-0" />
-                  <span className="text-sm text-red-800">
-                    <strong>{changesData.orphan_acl_count}</strong> 条孤儿权限 — 资源已退役但 ACL 未清理
-                  </span>
-                </div>
-              )}
-            </div>
-          )}
+          {/* P1-7: 待处理告警 */}
+          {changesData &&
+            (changesData.expired_acl_count > 0 ||
+              changesData.orphan_acl_count > 0) && (
+              <div className="mb-6 space-y-2">
+                {changesData.expired_acl_count > 0 && (
+                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg px-4 py-3 flex items-center gap-3">
+                    <Clock size={18} className="text-yellow-600 flex-shrink-0" />
+                    <span className="text-sm text-yellow-800">
+                      <strong>{changesData.expired_acl_count}</strong>{" "}
+                      条 ACL 已过期但未回收 — 建议清理
+                    </span>
+                  </div>
+                )}
+                {changesData.orphan_acl_count > 0 && (
+                  <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center gap-3">
+                    <AlertTriangle
+                      size={18}
+                      className="text-red-600 flex-shrink-0"
+                    />
+                    <span className="text-sm text-red-800">
+                      <strong>{changesData.orphan_acl_count}</strong>{" "}
+                      条孤儿权限 — 资源已退役但 ACL 未清理
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
 
-          {/* 统计卡片 */}
+          {/* ══════════════════════════════════════════════════ */}
+          {/* 数据驱动统计卡片 — 按后端返回动态渲染 */}
+          {/* ══════════════════════════════════════════════════ */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            <StatCard
-              title="知识库数"
-              value={stats?.kb_count ?? "-"}
-              icon={<FolderOpen size={32} />}
-              description="活跃 KB"
-              color="text-blue-500"
-            />
-            <StatCard
-              title="文档数"
-              value={stats?.document_count ?? "-"}
-              icon={<FileText size={32} />}
-              description="已注册文档"
-              color="text-purple-500"
-            />
+            {/* 平台模式：项目总数 */}
+            {isPlatformMode && stats && stats.project_count > 0 && (
+              <StatCard
+                title="项目总数"
+                value={stats.project_count}
+                icon={<Boxes size={32} />}
+                description="活跃项目"
+                color="text-cyan-500"
+              />
+            )}
+
+            {/* 资源统计：按 resource_type GROUP BY 动态渲染 */}
+            {stats?.resource_stats.map((rs) => (
+              <StatCard
+                key={rs.resource_type}
+                title={rs.label}
+                value={rs.count}
+                icon={RESOURCE_ICONS[rs.resource_type] ?? <Globe size={32} />}
+                description={`活跃 ${rs.label}`}
+                color={RESOURCE_COLORS[rs.resource_type] ?? "text-gray-500"}
+              />
+            ))}
+
+            {/* 用户总数 */}
             <StatCard
               title="用户数"
               value={stats?.user_count ?? "-"}
               icon={<Users size={32} />}
-              description="同步自 Keycloak"
+              description={isPlatformMode ? "同步自 Keycloak" : "项目成员"}
               color="text-green-500"
             />
+
+            {/* ACL 条目 */}
             <StatCard
               title="ACL 条目"
               value={stats?.acl_count ?? "-"}
               icon={<Key size={32} />}
               description="活跃权限"
-              color="text-yellow-500"
+              color="text-yellow-600"
             />
+
+            {/* 封禁统计：按 restriction_type GROUP BY 动态渲染 */}
+            {stats?.restriction_stats.map((rs) => (
+              <StatCard
+                key={rs.restriction_type}
+                title={rs.label}
+                value={rs.count}
+                icon={
+                  RESTRICTION_ICONS[rs.restriction_type] ?? (
+                    <Ban size={32} />
+                  )
+                }
+                description="生效中"
+                color={
+                  RESTRICTION_COLORS[rs.restriction_type] ?? "text-red-500"
+                }
+              />
+            ))}
+
+            {/* 24h 变更 */}
             <StatCard
               title="最近变更"
               value={stats?.recent_changes ?? "-"}
@@ -198,16 +309,11 @@ export default function DashboardPage() {
               description="24 小时内"
               color="text-indigo-500"
             />
-            <StatCard
-              title="活跃封禁"
-              value={stats?.active_restrictions ?? "-"}
-              icon={<Ban size={32} />}
-              description="生效中"
-              color="text-red-500"
-            />
           </div>
 
-          {/* P1-7: 最近变更时间线 */}
+          {/* ══════════════════════════════════════════════════ */}
+          {/* 最近变更时间线 + 告警面板 */}
+          {/* ══════════════════════════════════════════════════ */}
           <div className="mt-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="bg-white rounded-lg shadow p-6">
               <div className="flex items-center justify-between mb-4">
@@ -238,7 +344,8 @@ export default function DashboardPage() {
                         </p>
                         {change.resource_type && (
                           <p className="text-xs text-gray-400">
-                            {change.resource_type}:{change.resource_id.slice(0, 12)}...
+                            {change.resource_type}:
+                            {change.resource_id.slice(0, 12)}...
                           </p>
                         )}
                       </div>
@@ -255,7 +362,6 @@ export default function DashboardPage() {
               )}
             </div>
 
-            {/* P1-7: 告警面板 */}
             <div className="bg-white rounded-lg shadow p-6">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-lg font-semibold flex items-center gap-2">
@@ -267,56 +373,86 @@ export default function DashboardPage() {
                 <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
                   <div>
                     <p className="text-sm font-medium">过期 ACL</p>
-                    <p className="text-xs text-gray-500">已过期但未自动回收的权限条目</p>
+                    <p className="text-xs text-gray-500">
+                      已过期但未自动回收的权限条目
+                    </p>
                   </div>
-                  <span className={`text-lg font-bold ${(changesData?.expired_acl_count ?? 0) > 0 ? "text-yellow-600" : "text-green-600"}`}>
+                  <span
+                    className={`text-lg font-bold ${
+                      (changesData?.expired_acl_count ?? 0) > 0
+                        ? "text-yellow-600"
+                        : "text-green-600"
+                    }`}
+                  >
                     {changesData?.expired_acl_count ?? "—"}
                   </span>
                 </div>
                 <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
                   <div>
                     <p className="text-sm font-medium">孤儿权限</p>
-                    <p className="text-xs text-gray-500">指向已退役资源的 ACL 条目</p>
+                    <p className="text-xs text-gray-500">
+                      指向已退役资源的 ACL 条目
+                    </p>
                   </div>
-                  <span className={`text-lg font-bold ${(changesData?.orphan_acl_count ?? 0) > 0 ? "text-red-600" : "text-green-600"}`}>
+                  <span
+                    className={`text-lg font-bold ${
+                      (changesData?.orphan_acl_count ?? 0) > 0
+                        ? "text-red-600"
+                        : "text-green-600"
+                    }`}
+                  >
                     {changesData?.orphan_acl_count ?? "—"}
                   </span>
                 </div>
-                <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                  <div>
-                    <p className="text-sm font-medium">活跃封禁</p>
-                    <p className="text-xs text-gray-500">当前生效中的封禁规则</p>
+                {/* 动态封禁告警 */}
+                {stats?.restriction_stats.map((rs) => (
+                  <div
+                    key={`alert-${rs.restriction_type}`}
+                    className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
+                  >
+                    <div>
+                      <p className="text-sm font-medium">{rs.label}</p>
+                      <p className="text-xs text-gray-500">
+                        当前生效中的{rs.label}规则
+                      </p>
+                    </div>
+                    <span className="text-lg font-bold text-gray-600">
+                      {rs.count}
+                    </span>
                   </div>
-                  <span className="text-lg font-bold text-gray-600">
-                    {stats?.active_restrictions ?? "—"}
-                  </span>
-                </div>
+                ))}
               </div>
             </div>
           </div>
 
-          {/* 快捷入口 */}
+          {/* 快捷入口 — 数据驱动：仅显示有统计的资源类型 */}
           <div className="mt-8 grid grid-cols-1 md:grid-cols-3 gap-6">
             <a
               href="/permissions"
               className="block p-5 bg-white rounded-lg shadow hover:shadow-md transition-shadow border border-gray-100"
             >
               <h3 className="font-medium">🔑 权限管理</h3>
-              <p className="text-sm text-gray-500 mt-1">授予/回收用户和组的访问权限</p>
+              <p className="text-sm text-gray-500 mt-1">
+                授予/回收用户和组的访问权限
+              </p>
             </a>
             <a
               href="/resources"
               className="block p-5 bg-white rounded-lg shadow hover:shadow-md transition-shadow border border-gray-100"
             >
               <h3 className="font-medium">📁 资源浏览</h3>
-              <p className="text-sm text-gray-500 mt-1">查看所有已注册的 KB 和文档资源</p>
+              <p className="text-sm text-gray-500 mt-1">
+                查看所有已注册的资源
+              </p>
             </a>
             <a
               href="/audit"
               className="block p-5 bg-white rounded-lg shadow hover:shadow-md transition-shadow border border-gray-100"
             >
               <h3 className="font-medium">🔍 审计日志</h3>
-              <p className="text-sm text-gray-500 mt-1">查看权限变更历史和判定记录</p>
+              <p className="text-sm text-gray-500 mt-1">
+                查看权限变更历史和判定记录
+              </p>
             </a>
           </div>
         </>
