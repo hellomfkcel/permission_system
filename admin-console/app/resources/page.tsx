@@ -7,8 +7,18 @@
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
+import { useAuthStore } from "@/stores/useAuthStore";
 import { useSearchParams } from "next/navigation";
-import { ACTION_LABELS, type Action } from "@/lib/constants";
+/** 通用动作标签（支持 kb/doc/platform，未知动作原样返回） */
+function actionLabel(a: string): string {
+  const m: Record<string, string> = {
+    "kb:read": "读取KB", "kb:write": "写入KB", "kb:manage": "管理KB", "kb:grant": "授权KB",
+    "doc:view": "查看文档", "doc:download": "下载文档", "doc:retrieve": "检索文档",
+    "doc:unmount": "移除文档", "doc:purge": "删除文档", "doc:share": "分享文档",
+    "platform:read": "平台读取", "platform:write": "平台写入",
+  };
+  return m[a] || a;
+}
 import api from "@/lib/api";
 import PermissionGrantDialog from "@/components/acl/PermissionGrantDialog";
 
@@ -80,6 +90,7 @@ interface ResourceDetail {
 
 export default function ResourcesPage() {
   const searchParams = useSearchParams();
+  const { currentProjectId } = useAuthStore();
 
   // URL 参数支持：?resource_type=kb&resource_id=xxx 自动展开详情
   // 设计依据：docs/外部系统设计.md §3.4.3 RAG 系统跳转入口对接 —
@@ -142,7 +153,7 @@ export default function ResourcesPage() {
 
   useEffect(() => {
     loadResources();
-  }, [filterType]);
+  }, [filterType, currentProjectId]);
 
   // URL 参数自动展开详情（resources 加载完成后触发一次）
   useEffect(() => {
@@ -207,16 +218,29 @@ export default function ResourcesPage() {
   }, [resources, debouncedSearch]);
 
   const typeLabel = (t: string) =>
-    t === "kb" ? "知识库" : t === "document" ? "文档" : t;
+    ({ kb: "知识库", document: "文档", platform: "平台功能" } as Record<string, string>)[t] || t;
 
-  const actionLabel = (action: string) => ACTION_LABELS[action as Action] || action;
+  const typeColor = (t: string) =>
+    ({ kb: "bg-blue-100 text-blue-800", document: "bg-purple-100 text-purple-800", platform: "bg-orange-100 text-orange-800" } as Record<string, string>)[t] || "bg-gray-100 text-gray-800";
 
-  // 统计指标
+  const statColor = (t: string) =>
+    ({ kb: "text-blue-600", document: "text-purple-600", platform: "text-orange-600" } as Record<string, string>)[t] || "text-gray-600";
+
+  // ── 数据驱动统计：按 resource_type GROUP BY + 退役数 ──
   const stats = useMemo(() => {
-    const kbCount = resources.filter((r) => r.resource_type === "kb" && !r.retired).length;
-    const docCount = resources.filter((r) => r.resource_type === "document" && !r.retired).length;
-    const retiredCount = resources.filter((r) => r.retired).length;
-    return { kbCount, docCount, retiredCount, total: resources.length };
+    const groups: Record<string, { active: number; retired: number }> = {};
+    for (const r of resources) {
+      if (!groups[r.resource_type]) groups[r.resource_type] = { active: 0, retired: 0 };
+      if (r.retired) groups[r.resource_type].retired++;
+      else groups[r.resource_type].active++;
+    }
+    // 所有出现过的 resource_type（按数量降序）
+    const types = Object.keys(groups).sort(
+      (a, b) => (groups[b].active + groups[b].retired) - (groups[a].active + groups[a].retired)
+    );
+    const totalActive = Object.values(groups).reduce((s, g) => s + g.active, 0);
+    const totalRetired = Object.values(groups).reduce((s, g) => s + g.retired, 0);
+    return { groups, types, totalActive, totalRetired, total: resources.length };
   }, [resources]);
 
   return (
@@ -232,24 +256,26 @@ export default function ResourcesPage() {
         </button>
       </div>
 
-      {/* 统计卡片 */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
+      {/* 数据驱动统计卡片 */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mb-6">
         <div className="bg-white rounded-lg shadow p-4">
-          <p className="text-xs text-gray-500">总计</p>
-          <p className="text-2xl font-bold">{stats.total}</p>
+          <p className="text-xs text-gray-500">活跃总计</p>
+          <p className="text-2xl font-bold">{stats.totalActive}</p>
         </div>
-        <div className="bg-white rounded-lg shadow p-4">
-          <p className="text-xs text-gray-500">知识库</p>
-          <p className="text-2xl font-bold text-blue-600">{stats.kbCount}</p>
-        </div>
-        <div className="bg-white rounded-lg shadow p-4">
-          <p className="text-xs text-gray-500">文档</p>
-          <p className="text-2xl font-bold text-purple-600">{stats.docCount}</p>
-        </div>
-        <div className="bg-white rounded-lg shadow p-4">
-          <p className="text-xs text-gray-500">已退役</p>
-          <p className="text-2xl font-bold text-red-600">{stats.retiredCount}</p>
-        </div>
+        {stats.types.map((rtype) => (
+          <div key={rtype} className="bg-white rounded-lg shadow p-4">
+            <p className="text-xs text-gray-500">{typeLabel(rtype)}</p>
+            <p className={`text-2xl font-bold ${statColor(rtype)}`}>
+              {stats.groups[rtype].active}
+            </p>
+          </div>
+        ))}
+        {stats.totalRetired > 0 && (
+          <div className="bg-white rounded-lg shadow p-4">
+            <p className="text-xs text-gray-500">已退役</p>
+            <p className="text-2xl font-bold text-red-600">{stats.totalRetired}</p>
+          </div>
+        )}
       </div>
 
       {/* 搜索 + 过滤器 */}
@@ -268,9 +294,12 @@ export default function ResourcesPage() {
           onChange={(e) => setFilterType(e.target.value)}
           className="border border-gray-300 rounded-lg px-3 py-2 text-sm"
         >
-          <option value="">全部类型</option>
-          <option value="kb">知识库 (kb)</option>
-          <option value="document">文档 (document)</option>
+          <option value="">全部类型 ({stats.total})</option>
+          {stats.types.map((rtype) => (
+            <option key={rtype} value={rtype}>
+              {typeLabel(rtype)} ({rtype}) — {stats.groups[rtype].active + stats.groups[rtype].retired}
+            </option>
+          ))}
         </select>
       </div>
 
@@ -333,11 +362,7 @@ export default function ResourcesPage() {
                       >
                         <td className="px-4 py-3 text-sm">
                           <span
-                            className={`px-2 py-0.5 rounded text-xs font-medium ${
-                              r.resource_type === "kb"
-                                ? "bg-blue-100 text-blue-800"
-                                : "bg-purple-100 text-purple-800"
-                            }`}
+                            className={`px-2 py-0.5 rounded text-xs font-medium ${typeColor(r.resource_type)}`}
                           >
                             {typeLabel(r.resource_type)}
                           </span>

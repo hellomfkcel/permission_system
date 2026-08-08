@@ -17,7 +17,7 @@ from app.database import get_db
 from models.acl import ACLEntry
 from models.role_binding import RoleBinding
 from services.event_publisher import get_event_publisher
-from api.auth_routes import get_current_admin
+from api.auth_routes import get_current_admin, get_project_scope, ProjectScope, require_platform_permission
 from schemas.responses import Principal
 from app.role_actions_config import (
     VALID_ACTIONS,
@@ -38,6 +38,7 @@ class GrantRequest(BaseModel):
     action: str = Field(..., description="kb:read | doc:view | doc:download | ...")
     granted_by: str = Field(...)
     expires_at: str | None = Field(None, description="过期时间 ISO 8601")
+    project_id: str = Field(..., description="所属项目 ID")
 
 
 class GrantResponse(BaseModel):
@@ -54,6 +55,7 @@ class RevokeRequest(BaseModel):
 
 class ACLEntryOut(BaseModel):
     id: str
+    project_id: str = ""                    # 所属项目 ID
     tenant_id: str
     principal: str
     resource_type: str
@@ -73,16 +75,29 @@ async def grant_acl(
     body: GrantRequest,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("permission_mgmt", "platform:write")),
 ) -> GrantResponse:
     """授予权限（需要管理员认证）。
 
     流程：
     1. 验证管理员身份（JWT Bearer token）
-    2. 检查是否已有相同 active 记录
-    3. INSERT acl_entries（granted_by 使用管理员身份）
-    4. 递增 global_permission_version
-    5. 发布 VisibilityChanged 事件
+    2. 验证 project_id 在管理员的项目访问范围内
+    3. 检查是否已有相同 active 记录
+    4. INSERT acl_entries（granted_by 使用管理员身份）
+    5. 递增 global_permission_version
+    6. 发布 VisibilityChanged 事件
     """
+    # 验证项目访问权限
+    if not scope.can_access(body.project_id):
+        raise HTTPException(status_code=403, detail=f"No access to project '{body.project_id}'")
+
+    # 验证项目存在
+    from models.project import Project
+    proj = await db.scalar(select(Project.id).where(Project.id == body.project_id))
+    if not proj:
+        raise HTTPException(status_code=404, detail=f"Project '{body.project_id}' not found")
+
     # 检查重复
     stmt = select(ACLEntry).where(
         ACLEntry.principal == body.principal,
@@ -105,6 +120,7 @@ async def grant_acl(
     new_id = uuid.uuid4()
     entry = ACLEntry(
         id=new_id,
+        project_id=body.project_id,
         tenant_id=body.tenant_id,
         principal=body.principal,
         resource_type=body.resource_type,
@@ -129,6 +145,7 @@ async def grant_acl(
             "action": "acl_granted",
             "principal": body.principal,
             "permission": body.action,
+            "project_id": body.project_id,
         },
     )
     await db.commit()  # ACL + change_log 原子提交
@@ -142,6 +159,7 @@ async def grant_acl(
             "action": "acl_granted",
             "principal": body.principal,
             "permission": body.action,
+            "project_id": body.project_id,
         },
     )
 
@@ -153,6 +171,8 @@ async def revoke_acl(
     body: RevokeRequest,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("permission_mgmt", "platform:write")),
 ) -> dict:
     """回收权限（需要管理员认证）。"""
     stmt = select(ACLEntry).where(
@@ -168,6 +188,10 @@ async def revoke_acl(
     if not entry:
         raise HTTPException(status_code=404, detail="grant not found")
 
+    # 验证项目访问权限
+    if not scope.can_access(entry.project_id):
+        raise HTTPException(status_code=403, detail=f"No access to project '{entry.project_id}'")
+
     entry.revoked = True
     entry.revoked_at = datetime.now(timezone.utc)
 
@@ -182,6 +206,7 @@ async def revoke_acl(
             "action": "acl_revoked",
             "principal": body.principal,
             "permission": body.action,
+            "project_id": entry.project_id,
         },
     )
     await db.commit()
@@ -193,6 +218,7 @@ async def revoke_acl(
             "action": "acl_revoked",
             "principal": body.principal,
             "permission": body.action,
+            "project_id": entry.project_id,
         },
     )
 
@@ -205,10 +231,13 @@ async def list_acl(
     resource_id: str | None = Query(None),
     principal: str | None = Query(None),
     revoked: bool | None = Query(None),
+    project_id: str | None = Query(None, description="按项目 ID 过滤"),
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("permission_mgmt", "platform:read")),
 ) -> list[ACLEntryOut]:
-    """查询 ACL 列表（需要管理员认证）。"""
+    """查询 ACL 列表（需要管理员认证）。按管理员项目范围自动过滤。"""
     conditions = []
     if resource_type:
         conditions.append(ACLEntry.resource_type == resource_type)
@@ -219,6 +248,20 @@ async def list_acl(
     if revoked is not None:
         conditions.append(ACLEntry.revoked == revoked)
 
+    # 项目范围过滤（platform_admin 不过滤）
+    # 平台级条目（project_id=NULL）始终对所有管理员可见
+    from sqlalchemy import or_
+    if project_id:
+        conditions.append(
+            or_(ACLEntry.project_id == project_id, ACLEntry.project_id.is_(None))
+        )
+    elif not scope.is_platform_admin:
+        scope_filter = scope.filter_condition(ACLEntry)
+        if scope_filter is not None:
+            conditions.append(
+                or_(scope_filter, ACLEntry.project_id.is_(None))
+            )
+
     stmt = select(ACLEntry).where(*conditions).order_by(ACLEntry.granted_at.desc())
     result = await db.execute(stmt)
     entries = result.scalars().all()
@@ -226,6 +269,7 @@ async def list_acl(
     return [
         ACLEntryOut(
             id=str(e.id),
+            project_id=e.project_id or "",
             tenant_id=e.tenant_id,
             principal=e.principal,
             resource_type=e.resource_type,
@@ -256,8 +300,11 @@ async def get_effective_permissions(
     principal: str | None = Query(None, description="主体: user:xxx | group:xxx"),
     resource_type: str | None = Query(None),
     resource_id: str | None = Query(None),
+    project_id: str | None = Query(None, description="按项目 ID 过滤"),
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("permission_mgmt", "platform:read")),
 ) -> list[EffectivePermission]:
     """计算某主体对资源的有效权限（合并 ACL + 角色绑定 + 封禁）。需要管理员认证。
 
@@ -270,6 +317,16 @@ async def get_effective_permissions(
         conditions.append(ACLEntry.resource_type == resource_type)
     if resource_id:
         conditions.append(ACLEntry.resource_id == resource_id)
+    if project_id:
+        conditions.append(
+            or_(ACLEntry.project_id == project_id, ACLEntry.project_id.is_(None))
+        )
+    elif not scope.is_platform_admin:
+        scope_filter = scope.filter_condition(ACLEntry)
+        if scope_filter is not None:
+            conditions.append(
+                or_(scope_filter, ACLEntry.project_id.is_(None))
+            )
 
     stmt = select(ACLEntry).where(*conditions).order_by(ACLEntry.granted_at.desc())
     result = await db.execute(stmt)
@@ -331,6 +388,8 @@ async def batch_grant_acl(
     body: BatchGrantRequest,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("permission_mgmt", "platform:write")),
 ) -> BatchGrantResult:
     """批量授予权限（需要管理员认证）。
 
@@ -343,6 +402,13 @@ async def batch_grant_acl(
 
     for grant in body.grants:
         try:
+            # 验证项目访问权限
+            pid = getattr(grant, 'project_id', '') or ''
+            if not scope.can_access(pid):
+                results.append({"principal": grant.principal, "action": grant.action, "status": "failed", "reason": f"No access to project '{pid}'"})
+                failed += 1
+                continue
+
             # 检查重复
             stmt = select(ACLEntry).where(
                 ACLEntry.principal == grant.principal,
@@ -362,6 +428,7 @@ async def batch_grant_acl(
             new_id = uuid.uuid4()
             entry = ACLEntry(
                 id=new_id,
+                project_id=pid,
                 tenant_id=grant.tenant_id,
                 principal=grant.principal,
                 resource_type=grant.resource_type,
@@ -426,8 +493,11 @@ _VALID_RESOURCE_TYPES = VALID_RESOURCE_TYPES
 @router.post("/import-csv", response_model=CSVImportResult)
 async def import_acl_csv(
     file: UploadFile = File(...),
+    project_id: str = Query(..., description="目标项目 ID"),
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("permission_mgmt", "platform:write")),
 ) -> CSVImportResult:
     """CSV 批量导入 ACL 权限。
 
@@ -443,6 +513,10 @@ async def import_acl_csv(
     设计依据：docs/外部系统设计.md §3.3 /permissions 页面 — 批量操作
               + docs/权限管理系统架构设计.md §2.1 动词目录。
     """
+    # 验证项目访问权限
+    if not scope.can_access(project_id):
+        raise HTTPException(status_code=403, detail=f"No access to project '{project_id}'")
+
     # 读取文件内容
     try:
         content = await file.read()
@@ -527,6 +601,7 @@ async def import_acl_csv(
             new_id = uuid.uuid4()
             entry = ACLEntry(
                 id=new_id,
+                project_id=project_id,
                 tenant_id=admin.tenant_id or "tenant-dev",
                 principal=principal,
                 resource_type=resource_type,

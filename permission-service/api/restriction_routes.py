@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from models.restriction import Restriction
 from services.event_publisher import get_event_publisher
-from api.auth_routes import get_current_admin
+from api.auth_routes import get_current_admin, get_project_scope, ProjectScope, require_platform_permission
 from schemas.responses import Principal
 
 router = APIRouter(prefix="/api/v1/restrictions", tags=["admin-restrictions"])
@@ -33,6 +33,7 @@ class AddRestrictionRequest(BaseModel):
     resource_id: str | None = Field(None, description="型二：受限的资源 ID")
     reason: str | None = Field(None)
     created_by: str
+    project_id: str = Field(..., description="所属项目 ID")
 
 
 class RestrictionOut(BaseModel):
@@ -56,8 +57,14 @@ async def add_restriction(
     body: AddRestrictionRequest,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("restriction_mgmt", "platform:write")),
 ) -> dict:
     """添加封禁/限制（需要管理员认证）。"""
+    # 验证项目访问权限
+    if not scope.can_access(body.project_id):
+        raise HTTPException(status_code=403, detail=f"No access to project '{body.project_id}'")
+
     # 验证
     if body.restriction_type == "subject_ban" and not body.principal:
         raise HTTPException(
@@ -76,6 +83,7 @@ async def add_restriction(
     new_id = uuid.uuid4()
     restriction = Restriction(
         id=new_id,
+        project_id=body.project_id,
         tenant_id=body.tenant_id,
         restriction_type=body.restriction_type,
         principal=body.principal,
@@ -132,6 +140,8 @@ async def remove_restriction(
     restriction_id: str = Query(...),
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("restriction_mgmt", "platform:write")),
 ) -> dict:
     """解除封禁/限制（需要管理员认证）。"""
     try:
@@ -148,6 +158,10 @@ async def remove_restriction(
 
     if not restriction:
         raise HTTPException(status_code=404, detail="restriction not found")
+
+    # 验证项目访问权限
+    if not scope.can_access(restriction.project_id):
+        raise HTTPException(status_code=403, detail=f"No access to project '{restriction.project_id}'")
 
     restriction.removed = True
     restriction.removed_at = datetime.now(timezone.utc)
@@ -193,10 +207,13 @@ async def list_restrictions(
     principal: str | None = Query(None),
     resource_type: str | None = Query(None),
     resource_id: str | None = Query(None),
+    project_id: str | None = Query(None, description="按项目 ID 过滤"),
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("restriction_mgmt", "platform:read")),
 ) -> list[RestrictionOut]:
-    """查询封禁/限制列表（需要管理员认证）。"""
+    """查询封禁/限制列表（需要管理员认证）。按管理员项目范围自动过滤。"""
     conditions = [Restriction.removed == False]  # noqa: E712
     if principal:
         conditions.append(Restriction.principal == principal)
@@ -204,6 +221,14 @@ async def list_restrictions(
         conditions.append(Restriction.resource_type == resource_type)
     if resource_id:
         conditions.append(Restriction.resource_id == resource_id)
+
+    # 项目范围过滤
+    if project_id:
+        conditions.append(Restriction.project_id == project_id)
+    elif not scope.is_platform_admin:
+        scope_filter = scope.filter_condition(Restriction)
+        if scope_filter is not None:
+            conditions.append(scope_filter)
 
     stmt = (
         select(Restriction)

@@ -59,6 +59,7 @@ class ResourceLifecycleRequest(BaseModel):
     tenant_id: str = Field(..., description="所属租户")
     kb_id: str | None = Field(None, description="KB ID (link/unlink)")
     idempotency_key: str = Field(..., description="幂等键")
+    project_id: str = Field(..., description="所属项目 ID（必填）")
 
 
 class CheckBatchItem(BaseModel):

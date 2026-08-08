@@ -13,11 +13,6 @@ import { useEffect, useState, useCallback } from "react";
 import api from "@/lib/api";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useToast } from "@/components/shared/Toast";
-import {
-  ACTIONS_BY_RESOURCE,
-  ACTION_LABELS,
-  type Action,
-} from "@/lib/constants";
 
 // ── 类型定义 ──
 
@@ -36,11 +31,11 @@ interface PrincipalOption {
   type: "user" | "group" | "role";
 }
 
-// ── 动词按资源类型分组 ──
-// 权威源: lib/constants.ts（单一来源，与设计文档 §2.1 对齐）
-const ACTIONS_BY_RESOURCE_TYPE: Record<string, { value: string; label: string; desc: string }[]> = {
-  kb: ACTIONS_BY_RESOURCE.kb.map((a: Action) => ({ value: a, label: a, desc: ACTION_LABELS[a] })),
-  document: ACTIONS_BY_RESOURCE.document.map((a: Action) => ({ value: a, label: a, desc: ACTION_LABELS[a] })),
+// ── 资源类型标签（从后台 /auth/config 动态获取，此处仅作 SSR 兜底）──
+const RESOURCE_TYPE_LABELS_FALLBACK: Record<string, string> = {
+  kb: "📚 知识库",
+  document: "📄 文档",
+  platform: "🔧 平台功能",
 };
 
 interface PermissionGrantDialogProps {
@@ -59,16 +54,14 @@ export default function PermissionGrantDialog({
   defaultResourceType,
   defaultResourceId,
 }: PermissionGrantDialogProps) {
-  const { user } = useAuthStore();
+  const { user, currentProjectId } = useAuthStore();
   const { showToast } = useToast();
 
   // ── 表单状态 ──
   const [principalType, setPrincipalType] = useState<"user" | "group" | "role">("user");
   const [principalSearch, setPrincipalSearch] = useState("");
   const [principal, setPrincipal] = useState("");
-  const [resourceType, setResourceType] = useState<"kb" | "document">(
-    (defaultResourceType as "kb" | "document") || "kb"
-  );
+  const [resourceType, setResourceType] = useState(defaultResourceType || "");
   const [resourceSearch, setResourceSearch] = useState("");
   const [resourceId, setResourceId] = useState(defaultResourceId || "");
   const [selectedActions, setSelectedActions] = useState<string[]>([]);
@@ -84,7 +77,13 @@ export default function PermissionGrantDialog({
   const [loadingPrincipals, setLoadingPrincipals] = useState(false);
   const [loadingResources, setLoadingResources] = useState(false);
 
-  // ── 加载主体列表 ──
+  // ── 动态数据：可用资源类型 + 动作 + 平台功能列表 ──
+  const [availableResourceTypes, setAvailableResourceTypes] = useState<string[]>([]);
+  const [actionsByResourceType, setActionsByResourceType] = useState<Record<string, string[]>>({});
+  const [resourceTypeLabels, setResourceTypeLabels] = useState<Record<string, string>>({});
+  const [platformFeatureIds, setPlatformFeatureIds] = useState<string[]>([]);
+
+  // ── 加载主体列表（稳定引用，无外部依赖）──
   const loadPrincipals = useCallback(async () => {
     setLoadingPrincipals(true);
     const opts: PrincipalOption[] = [];
@@ -127,31 +126,98 @@ export default function PermissionGrantDialog({
     setLoadingPrincipals(false);
   }, []);
 
-  // ── 加载资源列表 ──
-  const loadResources = useCallback(async () => {
+  // ── 加载配置：资源类型 + 动作 + 平台功能（一次 API 调用，稳定引用）──
+  //     接收 defaultRT 参数而非从闭包读取，避免 useCallback 依赖 defaultResourceType。
+  //     资源动作、标签均从 /auth/config 动态获取，无硬编码。
+  const loadConfig = useCallback(async (defaultRT?: string) => {
+    try {
+      const [resourcesRes, configRes] = await Promise.all([
+        api.get<Resource[]>("/api/v1/resources"),
+        api.get("/api/v1/auth/config"),
+      ]);
+      // 资源类型：合并两个来源
+      // 1. resource_registry 表中存在实例的类型
+      const types = new Set(resourcesRes.data.map(r => r.resource_type));
+      // 2. Cerbos YAML 中定义的资源类型（如 OA 系统的 oa_leave_request 等）
+      const resourceActions: Record<string, string[]> = configRes.data.resource_actions || {};
+      for (const rt of Object.keys(resourceActions)) {
+        types.add(rt);
+      }
+      types.add("platform");
+      const typeList = Array.from(types).sort();
+      setAvailableResourceTypes(typeList);
+      // 选定资源类型：优先使用外部传入的 defaultRT，否则用列表第一项
+      const resolvedType = defaultRT && typeList.includes(defaultRT)
+        ? defaultRT
+        : (typeList[0] || "");
+      if (typeList.length > 0) {
+        setResourceType(resolvedType);
+      }
+      // 动作按资源类型分组（从 /auth/config 的 resource_actions 直接获取，无需本地解析前缀）
+      const byType: Record<string, string[]> = configRes.data.resource_actions || {};
+      setActionsByResourceType(byType);
+      // 资源类型标签（从 /auth/config 动态获取）
+      const labels: Record<string, string> = configRes.data.resource_type_labels || {};
+      setResourceTypeLabels(labels);
+      // 平台功能 ID 列表（从 /auth/config 的 platform_features 获取）
+      const features: Record<string, string> = configRes.data.platform_features || {};
+      setPlatformFeatureIds(Object.keys(features).sort());
+    } catch (err: unknown) {
+      // 后端不可达：设置空状态，UI 将显示错误提示
+      console.error("[PermissionGrantDialog] loadConfig failed:", err);
+      setAvailableResourceTypes([]);
+      setActionsByResourceType({});
+      setResourceTypeLabels({});
+      setPlatformFeatureIds([]);
+    }
+  }, []);
+
+  // ── 加载资源列表（稳定引用，rt + featureIds 由调用方传入）──
+  const loadResourcesForType = useCallback(async (rt: string, featureIds: string[]) => {
+    if (!rt) return;
     setLoadingResources(true);
     try {
-      const res = await api.get<Resource[]>(`/api/v1/resources?type=${resourceType}`);
-      setResources(res.data.filter((r: Resource) => !r.retired));
+      if (rt === "platform") {
+        // 平台功能资源不在 resource_registry 中，从后端配置获取
+        setResources(featureIds.map(id => ({
+          id: `platform-${id}`, resource_type: "platform", resource_id: id,
+          tenant_id: "", owner: "system", retired: false,
+        } as Resource)));
+      } else {
+        // 尝试从 resource_registry 查询（对于 YAML 定义的自定义类型可能返回空）
+        try {
+          const res = await api.get<Resource[]>(`/api/v1/resources?type=${rt}`);
+          setResources(res.data.filter((r: Resource) => !r.retired));
+        } catch {
+          // 自定义资源类型（如 OA 系统资源）没有 DB 实例，允许手动输入
+          setResources([]);
+        }
+      }
     } catch {
       setResources([]);
     }
     setLoadingResources(false);
-  }, [resourceType]);
+  }, []);
 
-  // ── 初始化 ──
+  // ── 初始化：打开 Dialog 时加载配置和主体列表 ──
+  //     仅依赖 open（loadConfig/loadPrincipals 为稳定引用，无需列入 deps）。
+  //     React 18 自动批处理 loadConfig 内部的多次 setState，
+  //     资源列表由下方的 resourceType 变化 effect 负责加载。
   useEffect(() => {
-    if (open) {
-      loadPrincipals();
-      loadResources();
-      setPrincipal(defaultResourceId ? `user:${user?.user_id || ""}` : "");
-      setResourceId(defaultResourceId || "");
-      setSelectedActions([]);
-      setExpiresIn("never");
-      setNotes("");
-      setSubmitting(false);
-    }
-  }, [open, loadPrincipals, loadResources, defaultResourceId, user]);
+    if (!open) return;
+
+    loadConfig(defaultResourceType);
+    loadPrincipals();
+
+    // 重置表单
+    setPrincipal(defaultResourceId ? `user:${user?.user_id || ""}` : "");
+    setResourceId(defaultResourceId || "");
+    setSelectedActions([]);
+    setExpiresIn("never");
+    setNotes("");
+    setSubmitting(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   // ── 主体过滤 ──
   useEffect(() => {
@@ -174,10 +240,13 @@ export default function PermissionGrantDialog({
     );
   }, [resourceSearch, resources]);
 
-  // ── 资源类型切换时重新加载 ──
+  // ── 资源类型切换或初始化完成后加载资源列表 ──
+  //     loadResourcesForType 为稳定引用，无需列入 deps。
   useEffect(() => {
-    if (open) loadResources();
-  }, [resourceType, open, loadResources]);
+    if (!open || !resourceType) return;
+    loadResourcesForType(resourceType, platformFeatureIds);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resourceType, open, platformFeatureIds]);
 
   // ── Action 勾选切换 ──
   const toggleAction = (action: string) => {
@@ -195,6 +264,7 @@ export default function PermissionGrantDialog({
     setSubmitting(true);
     const tenantId = user?.tenant_id || "tenant-dev";
     const grantedBy = principal.startsWith("user:") ? principal : `user:${user?.user_id || "admin"}`;
+    const pid = currentProjectId && currentProjectId !== "__all__" ? currentProjectId : "rag-v14";
 
     try {
       if (selectedActions.length === 1) {
@@ -206,6 +276,7 @@ export default function PermissionGrantDialog({
           resource_id: resourceId,
           action: selectedActions[0],
           granted_by: grantedBy,
+          project_id: pid,
           expires_at: expiresIn === "never" ? null : new Date(Date.now() + parseInt(expiresIn) * 1000).toISOString(),
         });
       } else {
@@ -218,6 +289,7 @@ export default function PermissionGrantDialog({
             resource_id: resourceId,
             action: action,
             granted_by: grantedBy,
+            project_id: pid,
             expires_at: expiresIn === "never" ? null : new Date(Date.now() + parseInt(expiresIn) * 1000).toISOString(),
           })),
         });
@@ -234,7 +306,12 @@ export default function PermissionGrantDialog({
     }
   };
 
-  const availableActions = ACTIONS_BY_RESOURCE_TYPE[resourceType] || [];
+  const actionList = actionsByResourceType[resourceType] || [];
+  const availableActions = actionList.map(a => ({
+    value: a,
+    label: a,
+    desc: "",
+  }));
 
   if (!open) return null;
 
@@ -303,29 +380,24 @@ export default function PermissionGrantDialog({
           {/* ── 资源选择 ── */}
           <div>
             <label className="block text-sm font-semibold text-gray-700 mb-2">资源</label>
-            <div className="flex gap-2 mb-2">
-              <button
-                onClick={() => { setResourceType("kb"); setResourceId(""); }}
-                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                  resourceType === "kb" ? "bg-green-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-                }`}
-              >
-                📚 知识库
-              </button>
-              <button
-                onClick={() => { setResourceType("document"); setResourceId(""); }}
-                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                  resourceType === "document" ? "bg-green-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-                }`}
-              >
-                📄 文档
-              </button>
+            <div className="flex gap-2 mb-2 flex-wrap">
+              {availableResourceTypes.map(rt => (
+                <button
+                  key={rt}
+                  onClick={() => { setResourceType(rt); setResourceId(""); }}
+                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                    resourceType === rt ? "bg-green-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                  }`}
+                >
+                  {resourceTypeLabels[rt] || RESOURCE_TYPE_LABELS_FALLBACK[rt] || rt}
+                </button>
+              ))}
             </div>
             <input
               type="text"
               value={resourceSearch}
               onChange={e => setResourceSearch(e.target.value)}
-              placeholder={`搜索${resourceType === "kb" ? "知识库" : "文档"}...`}
+              placeholder={`搜索${resourceTypeLabels[resourceType] || RESOURCE_TYPE_LABELS_FALLBACK[resourceType] || resourceType}...`}
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500"
               disabled={loadingResources}
             />
@@ -344,7 +416,7 @@ export default function PermissionGrantDialog({
                     onClick={() => { setResourceId(r.resource_id); setResourceSearch(""); }}
                     className="w-full text-left px-3 py-2 text-sm hover:bg-green-50 flex items-center justify-between"
                   >
-                    <span>{r.resource_type === "kb" ? "📚" : "📄"} {r.resource_id}</span>
+                    <span>{r.resource_id}</span>
                     <span className="text-gray-400 text-xs">{r.owner}</span>
                   </button>
                 ))}

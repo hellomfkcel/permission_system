@@ -103,6 +103,123 @@ async def _keycloak_sync_loop(stop_event: asyncio.Event) -> None:
             pass  # 正常超时 → 继续下一轮同步
 
 
+async def _migrate_hardcoded_registries() -> None:
+    """首次启动时将硬编码注册表自动迁移到 DB。
+
+    Phase 1: 将 ALLOWED_CLIENTS, _ALLOWED_AUDIENCES, SERVICE_API_KEY
+    从 Python 源码硬编码迁移到 project_* 表。只执行一次。
+    """
+    import hashlib
+    from sqlalchemy import select, func as sa_func
+    from app.database import async_session
+    from models.project import Project, ProjectClient, ProjectApiKey, ProjectAudience
+
+    async with async_session() as db:
+        # 检查是否已迁移过
+        count = await db.scalar(
+            select(sa_func.count()).select_from(Project)
+        )
+        if count and count > 0:
+            return
+
+    # 创建 RAG 项目
+    rag = Project(
+        id="rag-v14",
+        name="RAG v14 知识库系统",
+        description="Auto-migrated from hardcoded registries on first startup",
+    )
+
+    async with async_session() as db:
+        try:
+            db.add(rag)
+
+            # 迁移 ALLOWED_CLIENTS → project_clients
+            for cid in ["interactive-backend", "retrieval", "ingest"]:
+                db.add(ProjectClient(project_id="rag-v14", client_id=cid,
+                                     description=f"Auto-migrated from ALLOWED_CLIENTS"))
+
+            # 迁移 _ALLOWED_AUDIENCES → project_audiences
+            for aud in ["retrieval-worker", "ingestion-worker", "stamping-worker"]:
+                db.add(ProjectAudience(project_id="rag-v14", audience=aud))
+
+            # 迁移 SERVICE_API_KEY → project_api_keys
+            if settings.service_api_key:
+                db.add(ProjectApiKey(
+                    project_id="rag-v14",
+                    key_hash=hashlib.sha256(settings.service_api_key.encode()).hexdigest(),
+                    key_prefix=settings.service_api_key[:16],
+                    description="Auto-migrated from SERVICE_API_KEY",
+                ))
+
+            # 将 admin 用户添加为 RAG 项目的 project_admin
+            from models.project import ProjectMember
+            db.add(ProjectMember(
+                project_id="rag-v14", user_id="admin",
+                role="project_admin", granted_by="auto-migration",
+            ))
+
+            await db.commit()
+            logger.info(
+                "hardcoded_registries_migrated",
+                project="rag-v14",
+                clients=["interactive-backend", "retrieval", "ingest"],
+                audiences=["retrieval-worker", "ingestion-worker", "stamping-worker"],
+                has_api_key=bool(settings.service_api_key),
+            )
+        except Exception as exc:
+            await db.rollback()
+            logger.warning("hardcoded_registries_migration_failed", error=str(exc)[:200])
+
+
+def _migrate_policy_directories() -> None:
+    """首次启动时将扁平策略目录迁移到 rag-v14/ 子目录。
+
+    Phase 2: 支持多项目策略命名空间隔离。
+    旧的扁平结构 derived_roles/ + resource_policies/ 直接放在 policies/ 下，
+    新结构按项目分目录: policies/rag-v14/derived_roles/ 等。
+
+    只执行一次（检测 rag-v14/ 是否已存在）。
+    """
+    import shutil
+    from pathlib import Path
+
+    policies_root = Path(__file__).parent.parent.parent / "cerbos" / "policies"
+    rag_dir = policies_root / "rag-v14"
+
+    if rag_dir.exists():
+        return  # 已迁移
+
+    # 检查是否需要迁移（旧扁平结构存在）
+    old_dr = policies_root / "derived_roles"
+    old_rp = policies_root / "resource_policies"
+    if not old_dr.exists() and not old_rp.exists():
+        return  # 无旧结构，无需迁移
+
+    try:
+        rag_dir.mkdir(parents=True, exist_ok=True)
+
+        for old_dir in [old_dr, old_rp]:
+            if old_dir.exists() and old_dir.is_dir():
+                dest = rag_dir / old_dir.name
+                shutil.move(str(old_dir), str(dest))
+                logger.info("policy_dir_migrated",
+                            source=str(old_dir), dest=str(dest))
+
+        # 迁移 .versions/ 目录
+        old_ver = policies_root / ".versions"
+        if old_ver.exists():
+            dest_ver = rag_dir / ".versions"
+            shutil.move(str(old_ver), str(dest_ver))
+            logger.info("policy_versions_migrated", dest=str(dest_ver))
+
+        logger.info("policy_directory_migration_complete",
+                    project="rag-v14",
+                    policy_root=str(rag_dir))
+    except Exception as exc:
+        logger.warning("policy_directory_migration_failed",
+                       error=str(exc)[:200])
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """应用生命周期管理。
@@ -121,6 +238,13 @@ async def lifespan(application: FastAPI):
     init_langfuse()
 
     await check_db()
+
+    # Phase 1: 首次启动时将硬编码注册表自动迁移到 DB
+    await _migrate_hardcoded_registries()
+
+    # Phase 2: 首次启动时将扁平策略目录迁移到 rag-v14/ 子目录
+    _migrate_policy_directories()
+
     logger.info("permission_service_starting",
                 host=settings.host, port=settings.port)
 
@@ -276,6 +400,7 @@ from api.auth_routes import router as auth_router
 from api.resource_routes import router as resource_admin_router
 from api.tenant_routes import router as tenant_router
 from api.role_definitions_routes import router as role_def_router
+from api.project_routes import router as project_router
 
 app.include_router(decision_router)
 app.include_router(context_router)
@@ -289,6 +414,7 @@ app.include_router(auth_router)
 app.include_router(resource_admin_router)
 app.include_router(tenant_router)
 app.include_router(role_def_router)
+app.include_router(project_router)
 
 
 if __name__ == "__main__":

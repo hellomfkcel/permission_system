@@ -1,0 +1,8 @@
+apiVersion: api.cerbos.dev/v1
+derivedRoles:
+  name: demo3_roles
+  definitions:
+    - name: viewer
+      parentRoles: ["user"]
+    - name: editor
+      parentRoles: ["viewer"]

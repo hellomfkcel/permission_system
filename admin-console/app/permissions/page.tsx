@@ -8,6 +8,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import api from "@/lib/api";
+import { useAuthStore } from "@/stores/useAuthStore";
 import { showConfirm } from "@/components/shared/Toast";
 import { useToast } from "@/components/shared/Toast";
 import PermissionGrantDialog from "@/components/acl/PermissionGrantDialog";
@@ -23,7 +24,8 @@ interface ACLEntry {
 
 export default function PermissionsPage() {
   const { showToast } = useToast();
-  const { formatResource } = useResourceNames();
+  const { currentProjectId } = useAuthStore();
+  const { formatResource } = useResourceNames(currentProjectId);
 
   const [activeTab, setActiveTab] = useState<"acl" | "roles">("acl");
   const [entries, setEntries] = useState<ACLEntry[]>([]);
@@ -49,7 +51,7 @@ export default function PermissionsPage() {
     setLoading(false);
   }, []);
 
-  useEffect(() => { loadACLs(); }, [loadACLs]);
+  useEffect(() => { loadACLs(); }, [loadACLs, currentProjectId]);
 
   const handleRevoke = async (entry: ACLEntry) => {
     if (!showConfirm(`确认回收 ${entry.principal} 对 ${entry.resource_type}:${entry.resource_id} 的 ${entry.action} 权限？`)) return;

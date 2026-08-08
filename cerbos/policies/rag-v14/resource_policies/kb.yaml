@@ -1,0 +1,25 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: "default"
+  resource: "kb"
+  importDerivedRoles:
+    - rag_roles
+  rules:
+    - actions: ["kb:read"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["kb_reader","kb_writer","kb_admin","admin"]
+      condition:
+        match:
+          expr: request.resource.attr.retired == false
+    - actions: ["kb:write"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["kb_writer","kb_admin","admin"]
+      condition:
+        match:
+          expr: request.resource.attr.retired == false
+    - actions: ["kb:manage"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["kb_admin","admin"]
+    - actions: ["kb:grant"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["admin"]

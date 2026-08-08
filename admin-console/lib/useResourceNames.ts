@@ -5,11 +5,10 @@
  *
  * resource_key 格式："resource_type:resource_id"（如 "kb:a6a9f8c0-..."）。
  *
- * 设计依据：docs/外部系统设计.md §2.4.4
- *   管理台专用 API GET /api/v1/resources 现已返回 name 字段。
+ * Phase 3e 修复：缓存按 project_id 分片，支持项目切换后自动刷新。
  *
  * 使用方式:
- *   const { getName, loading } = useResourceNames();
+ *   const { getName, loading } = useResourceNames(currentProjectId);
  *   const displayName = getName("kb", "a6a9f8c0-...") ?? "a6a9f8c0-...";
  */
 
@@ -24,52 +23,69 @@ interface ResourceItem {
   name: string | null;
 }
 
-/** 单例缓存：多个组件共享同一份数据，避免重复请求 */
-let _cachedMap: Map<string, string> | null = null;
-let _fetchPromise: Promise<Map<string, string>> | null = null;
+/** 多项目缓存：project_id → Map<resource_key, name> */
+const _cacheByProject = new Map<string, Map<string, string>>();
+const _promisesByProject = new Map<string, Promise<Map<string, string>>>();
 
-async function fetchResourceMap(): Promise<Map<string, string>> {
-  if (_cachedMap) return _cachedMap;
-  if (_fetchPromise) return _fetchPromise;
+async function fetchResourceMap(projectId: string | null): Promise<Map<string, string>> {
+  const cacheKey = projectId || "__all__";
+  const cached = _cacheByProject.get(cacheKey);
+  if (cached) return cached;
 
-  _fetchPromise = (async () => {
+  const pending = _promisesByProject.get(cacheKey);
+  if (pending) return pending;
+
+  const promise = (async () => {
     const map = new Map<string, string>();
     try {
-      // 分两次获取（无过滤条件的 /api/v1/resources 返回所有资源）
-      const [kbRes, docRes] = await Promise.all([
-        api.get<ResourceItem[]>("/api/v1/resources", { params: { type: "kb" } }),
-        api.get<ResourceItem[]>("/api/v1/resources", { params: { type: "document" } }),
-      ]);
+      const params: Record<string, string> = { type: "kb" };
+      // 平台模式不传 project_id，项目模式传 project_id
+      if (projectId && projectId !== "__all__") {
+        params.project_id = projectId;
+      }
+      const kbRes = await api.get<ResourceItem[]>("/api/v1/resources", { params });
+      const docParams: Record<string, string> = { type: "document" };
+      if (projectId && projectId !== "__all__") {
+        docParams.project_id = projectId;
+      }
+      const docRes = await api.get<ResourceItem[]>("/api/v1/resources", { params: docParams });
       for (const r of [...(kbRes.data || []), ...(docRes.data || [])]) {
         if (r.name) {
           map.set(`${r.resource_type}:${r.resource_id}`, r.name);
         }
       }
     } catch {
-      // 静默失败：映射表为空时各组件回退显示 resource_id
+      // 静默失败
     }
-    _cachedMap = map;
+    _cacheByProject.set(cacheKey, map);
     return map;
   })();
 
-  return _fetchPromise;
+  _promisesByProject.set(cacheKey, promise);
+  return promise;
 }
 
-export function useResourceNames() {
-  const [nameMap, setNameMap] = useState<Map<string, string>>(_cachedMap ?? new Map());
+export function useResourceNames(projectId?: string | null) {
+  const cacheKey = projectId || "__all__";
+  const [nameMap, setNameMap] = useState<Map<string, string>>(
+    _cacheByProject.get(cacheKey) ?? new Map()
+  );
   const mountedRef = useRef(true);
 
   useEffect(() => {
     mountedRef.current = true;
-    if (_cachedMap) {
-      setNameMap(_cachedMap);
+    const cached = _cacheByProject.get(cacheKey);
+    if (cached) {
+      setNameMap(cached);
       return;
     }
-    fetchResourceMap().then((map) => {
+    fetchResourceMap(projectId ?? null).then((map) => {
       if (mountedRef.current) setNameMap(new Map(map));
     });
-    return () => { mountedRef.current = false; };
-  }, []);
+    return () => {
+      mountedRef.current = false;
+    };
+  }, [cacheKey]);
 
   const getName = useCallback(
     (resourceType: string, resourceId: string): string | null => {
@@ -78,7 +94,6 @@ export function useResourceNames() {
     [nameMap],
   );
 
-  /** 格式化显示：有名称显示名称，否则回退 resource_id */
   const formatResource = useCallback(
     (resourceType: string | null, resourceId: string | null): string => {
       if (!resourceType || !resourceId) return "—";
@@ -87,7 +102,7 @@ export function useResourceNames() {
     [getName],
   );
 
-  const loading = !_cachedMap;
+  const loading = !_cacheByProject.has(cacheKey);
 
   return { getName, formatResource, loading };
 }

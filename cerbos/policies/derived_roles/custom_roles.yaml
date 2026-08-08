@@ -1,0 +1,16 @@
+# Auto-generated custom roles - DO NOT EDIT MANUALLY
+# Managed by Permission Service role management API
+apiVersion: api.cerbos.dev/v1
+derivedRoles:
+  name: custom_roles
+  definitions:
+    - name: tttttt
+      parentRoles: ['user']
+      condition:
+        match:
+          expr: "true"
+    - name: ttttttttttt
+      parentRoles: ['user']
+      condition:
+        match:
+          expr: "true"

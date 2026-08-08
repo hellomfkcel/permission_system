@@ -6,7 +6,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Boolean, DateTime, func
+from sqlalchemy import String, Boolean, DateTime, func, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -18,12 +18,17 @@ class RoleDefinition(Base):
 
     Cerbos YAML 为权限映射的权威源；此表为角色元数据的权威源。
     is_system=true 的角色不可删除（对应 Cerbos 中预定义的派生角色）。
+    project_id=NULL 表示平台级角色（所有项目共享）。
     """
 
     __tablename__ = "role_definitions"
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("projects.id"), nullable=True,
+        default=None, comment="所属项目 ID（NULL=平台级角色）",
     )
     name: Mapped[str] = mapped_column(
         String(64), nullable=False, unique=True,
@@ -50,4 +55,8 @@ class RoleDefinition(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_role_def_project", "project_id"),
     )

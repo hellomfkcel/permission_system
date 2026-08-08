@@ -38,7 +38,7 @@ interface PrincipalOption {
 }
 
 export default function RestrictionManager() {
-  const { user } = useAuthStore();
+  const { user, currentProjectId } = useAuthStore();
   const { showToast } = useToast();
   const { formatResource } = useResourceNames();
 
@@ -52,8 +52,9 @@ export default function RestrictionManager() {
   const [restrictionType, setRestrictionType] = useState<"subject_ban" | "resource_restriction">("subject_ban");
   const [banPrincipal, setBanPrincipal] = useState("");
   const [banPrincipalSearch, setBanPrincipalSearch] = useState("");
-  const [resType, setResType] = useState("kb");
+  const [resType, setResType] = useState("");
   const [resId, setResId] = useState("");
+  const [availableResTypes, setAvailableResTypes] = useState<string[]>([]);
   const [reason, setReason] = useState("");
 
   // 筛选
@@ -75,6 +76,16 @@ export default function RestrictionManager() {
       setItems([]);
     }
     setLoading(false);
+  }, []);
+
+  // 加载可用资源类型
+  useEffect(() => {
+    api.get("/api/v1/resources").then(r => {
+      const types = new Set((r.data as Array<{resource_type: string}>).map(x => x.resource_type));
+      const typeList = Array.from(types).sort();
+      setAvailableResTypes(typeList);
+      if (typeList.length > 0 && !resType) setResType(typeList[0]);
+    }).catch(() => setAvailableResTypes(["kb", "document"]));
   }, []);
 
   const loadPrincipals = useCallback(async () => {
@@ -116,6 +127,7 @@ export default function RestrictionManager() {
 
     setSubmitting(true);
     try {
+      const pid = currentProjectId && currentProjectId !== "__all__" ? currentProjectId : "rag-v14";
       await api.post("/api/v1/restrictions/add", {
         tenant_id: user?.tenant_id || "tenant-dev",
         restriction_type: restrictionType,
@@ -124,13 +136,14 @@ export default function RestrictionManager() {
         resource_id: restrictionType === "resource_restriction" ? resId.trim() : null,
         reason: reason.trim() || null,
         created_by: user?.user_id || "admin",
+        project_id: pid,
       });
 
       const typeLabel = restrictionType === "subject_ban" ? "主体封禁" : "资源限制";
       showToast("success", `${typeLabel}已生效`);
       setShowAddForm(false);
       setBanPrincipal("");
-      setResType("kb");
+      setResType(availableResTypes[0] || "");
       setResId("");
       setReason("");
       loadItems();
@@ -314,8 +327,9 @@ export default function RestrictionManager() {
                     onChange={e => setResType(e.target.value)}
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
                   >
-                    <option value="kb">kb（知识库）</option>
-                    <option value="document">document（文档）</option>
+                    {availableResTypes.map(rt => (
+                      <option key={rt} value={rt}>{rt}</option>
+                    ))}
                   </select>
                 </div>
                 <div>

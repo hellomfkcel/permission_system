@@ -1,0 +1,29 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  resource: "oa_expense_report"
+  version: "default"
+  importDerivedRoles:
+    - oa_roles
+  rules:
+    # 普通员工：创建报销、查看自己的报销单、取消
+    - actions: ["create", "read:own", "cancel"]
+      effect: EFFECT_ALLOW
+      roles: ["oa_employee"]
+
+    # 部门经理：查看本部门报销、审批（≤5000）、驳回
+    - actions: ["read:department", "approve", "reject"]
+      effect: EFFECT_ALLOW
+      roles: ["oa_manager"]
+      condition:
+        match:
+          expr: request.resource.attr.amount <= 5000
+
+    # CEO：审批任意金额
+    - actions: ["approve", "read:all", "reject", "cancel"]
+      effect: EFFECT_ALLOW
+      roles: ["oa_ceo"]
+
+    # HR：查看全公司报销记录
+    - actions: ["read:all"]
+      effect: EFFECT_ALLOW
+      roles: ["oa_hr"]

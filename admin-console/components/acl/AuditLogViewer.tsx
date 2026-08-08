@@ -15,6 +15,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import api from "@/lib/api";
+import { useAuthStore } from "@/stores/useAuthStore";
 import { useResourceNames } from "@/lib/useResourceNames";
 
 // ── 类型 ──
@@ -54,13 +55,18 @@ const EVENT_LABELS: Record<string, { label: string; color: string }> = {
 const PAGE_SIZE = 50;
 
 export default function AuditLogViewer() {
+  const { currentProjectId } = useAuthStore();
+  const isPlatformMode = !currentProjectId || currentProjectId === "__all__";
+
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const { formatResource } = useResourceNames();
+  const { formatResource } = useResourceNames(currentProjectId);
+  // 动态资源类型列表
+  const [availableResTypes, setAvailableResTypes] = useState<string[]>([]);
 
-  // 筛选 — P2-3: 新增 decision_id, from_time, to_time
+  // 筛选
   const [filters, setFilters] = useState({
     resource_type: "",
     resource_id: "",
@@ -71,13 +77,20 @@ export default function AuditLogViewer() {
     to_time: "",
   });
 
+  // 加载可用资源类型
+  useEffect(() => {
+    api.get("/api/v1/resources").then(r => {
+      const types = new Set((r.data as Array<{resource_type: string}>).map(x => x.resource_type));
+      setAvailableResTypes(["platform", ...Array.from(types)].sort());
+    }).catch(() => {});
+  }, []);
+
   const load = useCallback(() => {
     setLoading(true);
     setError("");
     const params = new URLSearchParams({ limit: String(PAGE_SIZE * 4) });
     if (filters.resource_type) params.set("resource_type", filters.resource_type);
     if (filters.resource_id) params.set("resource_id", filters.resource_id);
-    // P2-3: 新过滤参数直接传给后端
     if (filters.principal) params.set("principal", filters.principal);
     if (filters.decision_id) params.set("decision_id", filters.decision_id);
     if (filters.from_time) params.set("from_time", filters.from_time);
@@ -88,7 +101,7 @@ export default function AuditLogViewer() {
       .then(r => setEntries(r.data || []))
       .catch(err => setError(err?.response?.data?.detail || err?.message || "加载审计日志失败"))
       .finally(() => setLoading(false));
-  }, [filters.resource_type, filters.resource_id, filters.principal, filters.decision_id, filters.from_time, filters.to_time]);
+  }, [filters.resource_type, filters.resource_id, filters.principal, filters.decision_id, filters.from_time, filters.to_time, currentProjectId]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -136,8 +149,9 @@ export default function AuditLogViewer() {
               className="w-full border rounded-lg px-3 py-2 text-sm"
             >
               <option value="">全部</option>
-              <option value="kb">kb</option>
-              <option value="document">document</option>
+              {availableResTypes.map(rt => (
+                <option key={rt} value={rt}>{rt}</option>
+              ))}
             </select>
           </div>
           <div>
