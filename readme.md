@@ -70,30 +70,29 @@
 | 消费者 | 读取方式 | 用途 |
 |--------|---------|------|
 | Cerbos PDP | disk driver 从 `/policies` 递归加载，`watchForChanges` 热重载 | 规则求值 |
-| 权限服务 `services/cerbos_policy_parser.py` | 按项目子目录扫描 `derived_roles/*.yaml` 与 `resource_policies/*.yaml`，合并 `rules[].roles` 与 `rules[].derivedRoles` 两个字段的 `actions` | 产出 `{角色: [动作]}` 映射，供 `acl_resolver` 把 `role_bindings` 展开为 `granted_actions` |
+| 权限服务 `services/cerbos_policy_parser.py` | 遍历策略树，收集 `derived_roles/` 与 `resource_policies/` 下的文件，合并 `rules[].roles` 与 `rules[].derivedRoles` 两个字段的 `actions` | 产出策略索引：角色到动作、资源类型到动作两组映射 |
 
-权限服务需要这份映射的原因：属性注入式策略（§4.3）要求服务端在调用 PDP 前先算出主体拥有哪些动作并注入 `principal.attr.granted_actions`，而“角色对应哪些动作”这层信息写在策略里。早期实现是在服务端维护一份 `ROLE_ACTIONS_MAP` 硬编码字典，与策略文件手工同步；当前实现删除了该副本，改为运行时解析策略文件，以策略为唯一权威源。代价是权限服务必须能读到策略目录，与 PDP 共享同一份文件（路径由 `CERBOS_POLICIES_DIR` 指定）。
+权限服务需要这份索引的原因：属性注入式策略（§4.3）要求服务端在调用 PDP 前先算出主体拥有哪些动作并注入 `principal.attr.granted_actions`，而“角色对应哪些动作”这层信息写在策略里。早期实现是在服务端维护一份 `ROLE_ACTIONS_MAP` 硬编码字典，与策略文件手工同步；当前实现删除了该副本，改为运行时解析策略文件，以策略为唯一权威源。代价是权限服务必须能读到策略目录，与 PDP 共享同一份文件（路径由 `CERBOS_POLICIES_DIR` 指定，容器部署中两者挂载同一卷）。
 
-解析结果缓存在进程内的 `_role_actions_cache`，由策略写入、策略删除、角色定义创建与删除四类操作显式调用 `invalidate_role_actions_cache()` 失效。该缓存没有 TTL。
+索引的命名空间按文件路径推导：
 
-角色定义在两处存储：
+| 路径形态 | 归属 | 可见范围 |
+|---------|------|---------|
+| `{root}/{project_id}/{derived_roles,resource_policies}/*.yaml` | 项目级 | 仅该项目 |
+| `{root}/{derived_roles,resource_policies}/*.yaml` | 无项目归属 | 全部项目 |
 
-| 存储 | 内容 | 写入时机 |
-|------|------|---------|
-| `role_definitions` 表 | 名称、描述、父角色、`permissions`、`project_id`、`is_system` | `POST /api/v1/roles/definitions` 先写表并提交 |
-| Cerbos YAML | 派生角色定义与资源规则 | 同一请求在事务提交后写文件，失败仅记 `cerbos_yaml_write_failed` 告警 |
+平台功能策略与管理台创建的平台级自定义角色落在后者。
 
-删除路径同构：先删表并提交，再清理 YAML，清理失败仅记 `cerbos_yaml_cleanup_failed`。角色定义没有更新端点。
+索引按策略目录指纹（文件路径、修改时间、大小）缓存，指纹探测有最小间隔以避免高频判定路径上的 stat 开销，并设 TTL 上限强制重新探测。策略写入、策略删除、角色定义增删四类操作额外主动失效本进程缓存。指纹机制使得其他进程写入的策略与绕过 API 直接编辑的文件都能被自动感知，无需重启。
 
-读取时三个消费者的取值来源不一致：
+角色定义在两处存储，各自承担不同职责：
 
-| 消费者 | 取值 |
-|--------|------|
-| 管理台角色列表与详情 | `role_definitions.permissions` 非空则用它，为空回退 YAML 解析结果 |
-| `GET /api/v1/roles/permissions` 权限矩阵 | 只用 YAML 解析结果 |
-| 判定链路 `get_role_actions_map()` | 只用 YAML 解析结果中 `source == "cerbos"` 的角色 |
+| 存储 | 内容 | 地位 |
+|------|------|------|
+| `role_definitions` 表 | 名称、描述、父角色、`project_id`、`is_system` | 档案信息 |
+| Cerbos YAML | 派生角色定义与资源规则 | 权限的唯一权威源 |
 
-由此产生的一致性缺口在 §16.1 列出。
+写路径先写策略文件再提交数据库，数据库失败时还原文件；删除路径先清理文件再删记录，失败时同样还原。管理台展示与判定链路的权限取值统一来自策略索引，角色接口另返回 `policy_synced` 标识表中存在但策略中缺失的角色。
 
 ### 2.4 项目作为隔离单元
 
@@ -117,9 +116,9 @@
 | perm-postgres | 5432 | 25433 | `docker-compose.yml` |
 | perm-redis | 6379 | 16380 | `docker-compose.yml` |
 | keycloak | 8080 | 8080 | `docker-compose.keycloak.yml` |
-| cerbos | 3592 / 3593 | 13592 / 13593 | 外部编排，配置见 `cerbos/.cerbos.yaml` |
+| cerbos | 3592 / 3593 | 13592 / 13593 | `docker-compose.yml` |
 
-Cerbos PDP 不在主 compose 中启动，需以 `cerbos/policies` 作为 `/policies` 挂载点独立运行。`.cerbos.yaml` 开启 `watchForChanges`，策略文件写入后自动重载，管理台的策略部署因此不需要重启 PDP。
+Cerbos 与权限服务挂载同一份 `./cerbos/policies`，两者对策略文件的视图一致。`.cerbos.yaml` 开启 `watchForChanges`，策略写入后 PDP 自动重载，管理台的策略部署不需要重启；权限服务侧由指纹探测感知（§2.3）。
 
 ## 3. 技术选型
 
@@ -155,7 +154,7 @@ Cerbos PDP 不在主 compose 中启动，需以 `cerbos/policies` 作为 `/polic
 
 `/v1/check` 与 `/v1/check/batch` 的 `resource.type` 与 `action` 是任意字符串，直接作为 Cerbos 的 `resource.kind` 与 action 传递。平台侧不校验其取值，有效集合由项目的资源策略决定。
 
-`app/role_actions_config.py:get_resource_actions()` 扫描 `cerbos/policies/{project}/resource_policies/*.yaml`，按 `resourcePolicy.resource` 分组收集 `rules[].actions`，作为管理台下拉选项与配置接口的数据源。`platform` 类型始终包含。
+`app/role_actions_config.py:get_resource_actions()` 从策略索引（§2.3）按 `resourcePolicy.resource` 分组取动作，作为管理台下拉选项、配置接口与 ACL 的 CSV 导入校验的数据源。`platform` 类型始终包含。
 
 现有项目的资源类型示例：
 
@@ -332,7 +331,9 @@ Cerbos PDP 不在主 compose 中启动，需以 `cerbos/policies` 作为 `/polic
 
 写操作统一经 `get_current_admin` 校验 Bearer token，经 `get_project_scope` 校验项目范围，经 `require_platform_permission` 校验平台功能权限。`granted_by` 一律取自 token 中的管理员身份，忽略请求体中的同名字段。
 
-创建自定义角色时，除写入 `role_definitions` 表外，同时生成 Cerbos YAML：派生角色追加到 `cerbos/policies/derived_roles/custom_roles.yaml`，资源规则按动作前缀分别写入 `cerbos/policies/resource_policies/custom_kb_{name}.yaml` 与 `custom_doc_{name}.yaml`。这两个路径是策略根目录的直接子目录，不在任何项目命名空间内，双写与解析可见性的后果见 §2.3 与 §16.1。
+角色定义的增删改会同时生成或清理 Cerbos 策略文件，落在角色所属的命名空间内：项目级角色写 `cerbos/policies/{project_id}/`，平台级角色写策略根目录。派生角色合并进该命名空间的 `derived_roles/custom_roles.yaml`，资源规则按资源类型分别写 `resource_policies/custom_{resource_type}_{name}.yaml`。
+
+动作到资源类型的对应关系取自策略索引：某动作出现在哪些资源策略的 `rules` 中就属于哪些资源类型。存在无法归属的动作时请求返回 422，不生成引用未定义资源的规则。文件写入与数据库提交互为回滚条件，写入顺序与失败处理见 §2.3。
 
 ### 5.6 事件与全局版本号
 
@@ -704,7 +705,8 @@ cerbos/policies/
 ├── rag-v14/                 首个接入项目：知识库与文档模型，属性注入式
 ├── demo2/                   OA 场景项目：请假、报销、绩效等，静态角色式
 ├── demo3/                   通用文档项目，静态角色式
-└── derived_roles/           管理台创建自定义角色时的写入目录，不属于任何项目命名空间
+├── derived_roles/           无项目归属的派生角色（平台角色 + 平台级自定义角色）
+└── resource_policies/       无项目归属的资源策略（platform 功能策略）
 docs/                        设计文档与诊断记录
 scripts/                     运维脚本
 docker-compose.yml           权限服务、管理台、PostgreSQL、Redis
@@ -713,53 +715,109 @@ docker-compose.keycloak.yml  Keycloak
 
 ## 16. 已知约束
 
-### 16.1 角色定义的数据一致性
+本节只记录当前仍然存在的约束。此前记录的角色定义一致性缺口、项目隔离缺口与环境硬编码已在代码中修复，修复内容见 §17。
 
-角色定义同时存在于 `role_definitions` 表与 Cerbos YAML，两者无事务保护、无对账机制，读路径的取值来源也不统一（§2.3）。已知缺口：
-
-| 缺口 | 成因 | 表现 |
-|------|------|------|
-| 自定义角色对权限服务不可见 | 写入路径是 `policies/derived_roles/` 与 `policies/resource_policies/`，而 `parse_permissions_matrix()` 的扫描模式是对每个项目子目录做 `rglob("derived_roles/*.yaml")`，匹配不到策略根目录下的同名目录 | Cerbos 递归加载该文件因而规则生效，权限服务解析不到该角色。静态角色式规则正常判定；属性注入式项目中该角色的绑定展开为空，判定按无权限处理。管理台仍显示 `role_definitions.permissions` 中的权限 |
-| YAML 写入失败后状态分叉 | 表写入已提交，文件写入失败只记告警 | 管理台显示角色存在且有权限，判定链路查不到该角色 |
-| YAML 清理失败后策略残留 | 表记录已删除，文件清理失败只记告警 | Cerbos 继续加载残留的派生角色与资源规则 |
-| 权限无法修改 | 角色定义没有更新端点 | 改权限须删除重建或直接编辑策略文件；有活跃绑定的角色不允许删除，此时只能改文件 |
-| 解析缓存不自愈 | `_role_actions_cache` 无 TTL，仅由本进程的策略与角色写操作失效 | 多 worker 或多副本部署时，其他进程保留旧映射；直接编辑盘上策略文件后 PDP 已按新规则求值，权限服务仍按旧映射展开角色绑定。函数 docstring 提到的 TTL 在实现中不存在 |
-| 展示与判定取值不同源 | 管理台优先读表，判定只读 YAML 解析结果 | 表与文件不一致时，管理台显示的权限不代表实际判定结果 |
-
-规避方式：自定义角色创建后核对 `GET /api/v1/roles/permissions` 是否返回该角色，返回为空说明判定链路不认；策略文件的带外修改后重启权限服务或通过管理台策略接口触发一次写入以失效缓存。
-
-### 16.2 平台级约束
+### 16.1 平台级约束
 
 | 约束 | 影响 |
 |------|------|
-| Cerbos 单 PDP 单策略根，全部项目策略同时加载 | 资源类型名（`resourcePolicy.resource`）与派生角色名在全平台唯一，需靠项目前缀避免冲突 |
-| `resource_registry` 的唯一约束是 `(resource_type, resource_id)`，不含 `project_id` | 不同项目使用同名资源类型且资源 ID 相同时会互相覆盖 |
-| `resolve_granted_actions_by_principal` 查询 ACL 时不按 `project_id` 过滤 | 判定期的项目隔离依赖资源类型与 ID 的全局唯一性，而非查询条件 |
-| `role_definitions.name` 全表唯一 | 项目级角色不能与其他项目重名 |
-| 管理台创建的自定义角色不落入项目命名空间 | 与按项目分目录的布局不一致，Cerbos 侧对全部项目可见 |
-| `principal.roles` 只来自 JWT | 静态角色式项目的角色授予必须在 Keycloak 完成，平台的角色绑定对其无效 |
+| Cerbos 单 PDP 单策略根，全部项目策略同时加载 | 资源类型名（`resourcePolicy.resource`）与派生角色名在全平台唯一，需靠项目前缀避免冲突（`demo2` 用 `oa_`、`demo3` 用 `demo3_`） |
+| `mount_registry` 无 `project_id` 列 | 挂载关系按 `(doc_id, kb_id)` 全局唯一，跨项目复用相同 ID 对会冲突 |
+| `principal.roles` 的 JWT 来源部分不可由平台授予 | 平台角色绑定已注入 `principal.roles`（§17），但 JWT 中的静态角色仍只能在 Keycloak 侧变更 |
 | 全部项目共用一个 Keycloak realm 与一份 JWT 公钥 | 无法按项目隔离身份源 |
-| `parse_permissions_matrix()` 与 `get_resource_actions()` 每次调用都遍历磁盘解析 | 管理台角色列表、权限矩阵、系统配置三个接口的耗时随策略文件数量增长，这两个函数本身无缓存 |
-| 指标不带项目维度 | 跨项目容量分析需依赖日志或 trace |
+| 判定链路无缓存层 | 容量按 §8 限流值规划；`/v1/filter` 结果永久禁止缓存 |
 
-### 16.3 RAG 耦合残留
+### 16.2 RAG 耦合残留
+
+以下属于对外 API 契约，改动会破坏已接入的检索型系统，需版本化迁移，未在本次范围内处理。
 
 | 位置 | 现状 |
 |------|------|
 | `/v1/prefilter`、`/v1/visibility`、`/v1/filter` | 字段固定为 `kbs`、`doc_id`、`channel.kb`、`allow_stamps`，仅检索型项目可用 |
 | `/v1/resources/link`、`unlink` 与 `mount_registry` | 挂载模型固定为 `doc_id` 与 `kb_id` 两列 |
 | `/v1/check` 对 `resource.type == "document"` 以 `channel.kb` 作 `granted_actions` 键 | 为 `rag_roles.yaml` 的派生角色表达式服务，其他项目若使用 `document` 类型需注意此特例 |
-| `app/role_actions_config.py:VALID_ACTIONS` | 硬编码 kb 与 doc 十个动作，用于 CSV 导入校验 |
-| `cerbos/policies/rag-v14/resource_policies/platform.yaml` | 平台自身的功能策略放在 rag-v14 目录下，且 `importDerivedRoles` 引用 `rag_roles` |
-| `KEYCLOAK_REALM` 默认值 `rag-v14` | 历史默认值 |
-| 首次启动的内置项目建档 | 固定创建 `rag-v14` 项目及其 client_id 与 audience |
-| `tests/test_joint_contract.py` | 全部用例基于知识库与文档模型 |
+| `app/role_actions_config.py:VALID_ACTIONS` | 保留 kb 与 doc 十个动作，用于补全策略未声明的同族动作；校验路径已改为按项目策略动态解析（§17） |
+| `tests/test_joint_contract.py` | 全部用例基于知识库与文档模型，其他项目没有对应的契约套件 |
 
-### 16.4 环境相关
+### 16.3 测试与环境
 
 | 约束 | 影响 |
 |------|------|
-| `tests/utils.py`、`tests/conftest.py`、`scripts/verify_cerbos_policy_sync.sh`、`scripts/cleanup_test_data.py` 含绝对路径常量 | 换机运行需修改 |
-| `docker-compose.yml` 的 `secrets` 段引用固定宿主机路径 | 部署前需按实际环境改写 |
-| Cerbos PDP 与 Keycloak 不在主 compose 中 | 需独立启动并保证策略目录挂载一致 |
-| 判定链路无缓存层 | 容量按 §8 限流值规划 |
+| 两个测试套件需要 Cerbos PDP 与 Redis 在位 | 判定类用例在缺少 PDP 时无法通过 |
+| `tests/test_api.py` 中部分用例未携带 `X-Api-Key` 与 `Authorization` | 这些用例早于多项目改造，仍会返回 401；本次只补齐了必填的 `project_id` |
+| 首次启动引导默认建立 `rag-v14` 项目 | 全新部署可设 `BOOTSTRAP_PROJECT_ENABLED=false` 跳过 |
+
+## 17. 已修复项
+
+以下为针对 §16 早期版本所列问题的代码修改，按主题归类。
+
+### 17.1 角色定义的数据一致性
+
+| 问题 | 处理 |
+|------|------|
+| 自定义角色写入策略根目录，而解析器按项目子目录扫描，导致角色对权限服务不可见 | 解析器改为遍历整个策略树并按路径推导命名空间，`{root}/{project}/…` 为项目级、`{root}/…` 为无项目归属；写入端按 `role_definitions.project_id` 落到对应目录 |
+| 表与策略文件双写无法互相回滚 | 改为先写策略文件再提交数据库，`PolicyTransaction` 保留被改写文件的原始内容，数据库失败时还原文件；删除路径同构 |
+| 删除角色时 YAML 清理必定失败 | 原实现引用未导入的 `_os` / `_re`，每次抛 `NameError` 并被调用方吞掉；清理逻辑重写在 `services/role_policy_writer.py` |
+| 角色权限无法修改 | 新增 `PUT /api/v1/roles/definitions/{name}`；内置角色拒绝改写，其策略条件由手工维护 |
+| 解析缓存无 TTL，跨进程与带外改文件不自愈 | 改为按策略目录指纹（路径 + mtime + 大小）缓存，探测有最小间隔并设 TTL 上限，其他进程写入与直接编辑文件均可感知 |
+| 管理台展示与判定取值不同源 | 两者统一走策略索引；角色接口新增 `policy_synced` 字段，标识表中存在但策略中缺失的角色 |
+| 生成的资源规则文件名按 kb / doc 前缀硬编码 | 改为按策略索引把动作反查到资源类型；无法归属的动作在创建时返回 422，不再生成引用未定义资源的规则 |
+
+### 17.2 项目隔离
+
+| 问题 | 处理 |
+|------|------|
+| 判定期 ACL、角色绑定、限制、资源属性查询不按项目过滤 | `services/acl_resolver.py` 全部查询接受 `project_id`，由 `/v1/*` 从准入中间件解析出的 `request.state.project_id` 传入 |
+| `resource_registry` 唯一键不含 `project_id`，跨项目同名资源互相覆盖 | 唯一键改为 `(project_id, resource_type, resource_id)`，生命周期端点按项目定位资源 |
+| `acl_entries`、`role_bindings` 唯一键不含 `project_id` | 改为项目内唯一；平台级授权（`project_id IS NULL`）用部分唯一索引单独表达 |
+| `role_definitions.name` 全表唯一 | 改为项目内唯一，平台级角色全平台唯一 |
+| 平台角色绑定对静态角色式项目不生效 | 适用的角色绑定并入 Cerbos `principal.roles`，匹配 `roles` 字段的策略可消费平台侧绑定 |
+| `system_admin` 通过认证与平台权限检查后被项目范围拒绝 | `get_project_scope` 与 `get_admin_project_ids` 改为与 `get_current_admin`、`require_platform_permission` 同口径处理 `platform_admin` / `system_admin` / `admin` |
+| 指标无项目维度 | `authz_decision_total`、`authz_call_failed_total` 增加 `project` 标签 |
+
+### 17.3 解耦
+
+| 问题 | 处理 |
+|------|------|
+| 平台功能策略放在 `rag-v14` 目录且引用该项目的派生角色 | 移到策略根目录并改用自带的 `platform_roles` 派生角色，`kb_reader` 等不再被计入 `platform:read` / `platform:write` |
+| CSV 导入按 kb / doc 硬编码校验动作与资源类型 | 改为按目标项目的策略动态解析合法取值 |
+| 首次启动固定建档 `rag-v14` 并迁移策略目录 | 建档改为可配置（`BOOTSTRAP_*`）；策略目录迁移逻辑删除，该目录现用于承载平台级策略 |
+| `KEYCLOAK_REALM` 默认值为 `rag-v14` | 改为 `permission-platform`，既有部署通过环境变量保留原值 |
+
+### 17.4 迁移链与依赖
+
+| 问题 | 处理 |
+|------|------|
+| `alembic upgrade head` 在空库必定失败 | `dddcf4c5164c` 未创建 `role_definitions.permissions`，而 `a1b2c3d4e5f6` 写入该列；补建列。种子数据向 `NOT NULL` 的 `project_id` 写 NULL，改为放开这两列的非空约束以表达平台级语义；`project_members` 种子改为仅在项目存在时插入 |
+| `requirements.txt` 缺 `python-multipart` | CSV 导入与策略上传端点在注册时即抛错，服务无法启动；补入该依赖与显式的 `PyYAML` |
+
+### 17.5 准入与可观测性
+
+| 问题 | 处理 |
+|------|------|
+| 未注册的 `X-Client-Id` 返回 500 而非 403 | `client_validator.py` 引用了未导入的 `HTTPException`，且中间件中抛异常不会被转成 403；改为直接返回 `JSONResponse` |
+| `/metrics` 标签值未加引号，Prometheus 无法解析 | 按文本格式输出 `label="value"` 并转义 |
+
+### 17.6 环境硬编码
+
+| 问题 | 处理 |
+|------|------|
+| 测试私钥路径写死为特定机器的绝对路径 | 改为默认取仓库内 `config/jwt_private.pem`，可用 `TEST_JWT_PRIVATE_KEY_PATH` 覆盖 |
+| `scripts/verify_cerbos_policy_sync.sh` 写死两侧目录 | 改为命令行参数或环境变量传入，支持按项目命名空间比对 |
+| `scripts/cleanup_test_data.py` 写死服务地址与数据库连接串 | 改为读环境变量 |
+| `docker-compose.yml` 的 secrets 指向固定宿主机路径 | 改为 `${SECRETS_DIR:-./permission-service/config}` |
+| Cerbos 不在主编排中，策略目录需手工保持一致 | 纳入 `docker-compose.yml`，与权限服务共享 `./cerbos/policies` 挂载 |
+
+### 17.7 验证方式
+
+| 验证项 | 方式 | 结果 |
+|--------|------|------|
+| 迁移链 | 空库执行 `alembic upgrade head` | 13 个版本全部通过 |
+| 唯一约束 | 直接 SQL 插入跨项目同名资源与 ACL，再插入项目内重复行 | 跨项目通过，项目内被 `uq_acl_project_scoped` 拒绝 |
+| 判定期项目隔离 | 真实数据库下调用 `resolve_granted_actions_by_principal`、`resolve_bound_roles`、`check_subject_ban` | 三者均按项目返回不同结果 |
+| 策略索引 | 对比新旧解析器在同一策略树上的输出 | 新解析器额外索引到根目录下的自定义角色 |
+| 缓存自愈 | 带外改写策略文件后再次查询角色动作 | 无需重启即反映新内容 |
+| 角色写入与回滚 | 临时策略树上执行创建、更新、回滚、删除 | 未定义动作被拒且无残留文件；回滚后角色不可见 |
+| 准入返回码 | 对 `/v1/check` 分别缺 API Key、错误 client_id、缺 client_id | 401 / 403 / 403 |
+| 服务启动 | 空库首次启动 | 引导建档成功，83 个端点注册 |
+| 回归对比 | 同环境下对改造前后运行 `tests/test_api.py` | 改造前 2 通过（14 例因硬编码路径报错），改造后 9 通过；判定类用例需 Cerbos PDP，本环境不具备 |

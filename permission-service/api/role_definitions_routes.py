@@ -1,8 +1,15 @@
 """角色管理 API — 角色定义 CRUD + 权限矩阵。
 
 设计依据：docs/manage_role_design.md §3.2 API 设计。
+
+一致性约定（修复角色定义双写分叉）：
+- 权限的唯一权威源是 Cerbos 策略文件；role_definitions 表保存档案信息
+  （描述、父角色、项目归属、是否内置），不再作为权限的独立数据源。
+- 写路径先写策略文件，再提交数据库；数据库失败时回滚文件。
+- 读路径统一走 _role_permissions()，管理台展示与判定链路取值同源。
 """
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func as sa_func
@@ -11,10 +18,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from models.role_definition import RoleDefinition
 from models.role_binding import RoleBinding
-from api.auth_routes import get_current_admin, get_project_scope, ProjectScope, require_platform_permission
+from api.auth_routes import (
+    get_current_admin, get_project_scope, ProjectScope, require_platform_permission,
+)
 from schemas.responses import Principal
+from services.cerbos_policy_parser import (
+    get_policy_index,
+    invalidate_role_actions_cache,
+    parse_permissions_matrix,
+)
+from services.role_policy_writer import (
+    PolicyWriteError,
+    remove_role_policies,
+    write_role_policies,
+)
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/roles", tags=["admin-roles"])
+
+# Keycloak 身份角色：权限由继承它的派生角色决定，自身不展示权限列表
+_KEYCLOAK_IDENTITY_ROLES = ("user", "system_admin")
 
 
 # ── 响应模型 ──
@@ -30,20 +54,12 @@ class RoleDefOut(BaseModel):
     permissions: list[str] = []
     binding_count: int = 0
     project_id: str | None = None   # NULL=平台级角色，否则为项目级角色
+    policy_synced: bool = True      # 策略文件中是否存在该角色
     created_at: str = ""
 
 
-class RoleDetailOut(BaseModel):
-    id: str
-    name: str
-    description: str
-    parent_keycloak_roles: list[str] = []
-    is_system: bool
-    is_keycloak_role: bool = False
-    permissions: list[str] = []
-    binding_count: int = 0
-    project_id: str | None = None
-    created_at: str = ""
+class RoleDetailOut(RoleDefOut):
+    pass
 
 
 class PermissionMatrixOut(BaseModel):
@@ -54,8 +70,66 @@ class CreateRoleRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]+$")
     description: str = Field("", max_length=512)
     parent_keycloak_roles: list[str] = Field(default=["user"])
-    permissions: list[str] = Field(default=[], description="角色权限列表: ['kb:read', 'doc:view', ...]")
+    permissions: list[str] = Field(
+        default=[], description="角色权限列表，取值须已在目标项目的资源策略中声明"
+    )
     project_id: str | None = Field(None, description="所属项目 ID（NULL=平台级角色）")
+
+
+class UpdateRoleRequest(BaseModel):
+    description: str | None = Field(None, max_length=512)
+    parent_keycloak_roles: list[str] | None = None
+    permissions: list[str] | None = None
+
+
+# ── 权限取值：管理台与判定链路同源 ──
+
+
+def _role_permissions(name: str, project_id: str | None) -> list[str]:
+    """返回角色的权限列表。
+
+    取值只来自策略索引，与 acl_resolver 展开角色绑定时使用的映射一致。
+    Keycloak 身份角色不展示权限（其权限由继承它的派生角色决定）。
+    """
+    if name in _KEYCLOAK_IDENTITY_ROLES:
+        return []
+    index = get_policy_index()
+    if name not in index.visible_roles(project_id):
+        return []
+    return sorted(index.role_actions[name])
+
+
+def _to_out(
+    r: RoleDefinition, binding_count: int, permissions: list[str], synced: bool,
+) -> RoleDefOut:
+    return RoleDefOut(
+        id=str(r.id),
+        name=r.name,
+        description=r.description or "",
+        parent_keycloak_roles=r.parent_keycloak_roles or [],
+        is_system=r.is_system,
+        is_keycloak_role=(r.name in _KEYCLOAK_IDENTITY_ROLES),
+        permissions=permissions,
+        binding_count=binding_count,
+        project_id=r.project_id,
+        policy_synced=synced,
+        created_at=r.created_at.isoformat() if r.created_at else "",
+    )
+
+
+async def _binding_counts(db: AsyncSession, names: list[str]) -> dict[str, int]:
+    if not names:
+        return {}
+    stmt = (
+        select(RoleBinding.role, sa_func.count().label("cnt"))
+        .where(
+            RoleBinding.role.in_(names),
+            RoleBinding.revoked == False,  # noqa: E712
+        )
+        .group_by(RoleBinding.role)
+    )
+    result = await db.execute(stmt)
+    return {row.role: row.cnt for row in result}
 
 
 # ── 端点 ──
@@ -69,21 +143,20 @@ async def list_role_definitions(
     scope: ProjectScope = Depends(get_project_scope),
     _perm: None = Depends(require_platform_permission("role_mgmt", "platform:read")),
 ) -> list[RoleDefOut]:
-    """获取所有角色定义列表（含绑定计数）。需要管理员认证。
+    """获取角色定义列表（含绑定计数与策略同步状态）。需要管理员认证。
 
-    按管理员项目范围自动过滤角色定义。
-    project_id=NULL（平台级角色）始终可见。
+    按管理员项目范围自动过滤。project_id 为 NULL 的平台级角色始终可见。
+    policy_synced=false 表示表中有该角色但策略文件中没有，其绑定在判定时不生效。
     """
     from sqlalchemy import or_
 
     stmt = select(RoleDefinition)
 
-    # 项目范围过滤
     if project_id:
         stmt = stmt.where(
             or_(
                 RoleDefinition.project_id == project_id,
-                RoleDefinition.project_id.is_(None),  # 平台级角色始终可见
+                RoleDefinition.project_id.is_(None),
             )
         )
     elif not scope.is_platform_admin and scope.project_ids is not None:
@@ -95,55 +168,21 @@ async def list_role_definitions(
                 )
             )
 
-    stmt = stmt.order_by(RoleDefinition.name)
-    result = await db.execute(stmt)
+    result = await db.execute(stmt.order_by(RoleDefinition.name))
     roles = result.scalars().all()
 
-    # 批量获取各角色的绑定数
-    role_names = [r.name for r in roles]
-    binding_counts: dict[str, int] = {}
-    if role_names:
-        bc_stmt = (
-            select(RoleBinding.role, sa_func.count().label("cnt"))
-            .where(
-                RoleBinding.role.in_(role_names),
-                RoleBinding.revoked == False,  # noqa: E712
-            )
-            .group_by(RoleBinding.role)
-        )
-        bc_result = await db.execute(bc_stmt)
-        for row in bc_result:
-            binding_counts[row.role] = row.cnt
+    counts = await _binding_counts(db, [r.name for r in roles])
+    index = get_policy_index()
 
-    # 从 Cerbos YAML 解析权限矩阵（用于 Cerbos 派生角色）
-    from services.cerbos_policy_parser import parse_permissions_matrix
-    matrix = parse_permissions_matrix()
-    cerbos_perms: dict[str, list[str]] = {}
-    for ri in matrix.get("roles", []):
-        cerbos_perms[ri["name"]] = ri.get("permissions", [])
-
-    return [
-        RoleDefOut(
-            id=str(r.id),
-            name=r.name,
-            description=r.description or "",
-            parent_keycloak_roles=r.parent_keycloak_roles or [],
-            is_system=r.is_system,
-            is_keycloak_role=(r.name in ("user", "system_admin")),
-            permissions=(
-                # Keycloak 身份角色：不显示权限（权限由继承的派生角色决定）
-                [] if r.name in ("user", "system_admin")
-                # 自定义角色：取自 DB 中显式存储的权限
-                else list(r.permissions) if r.permissions
-                # Cerbos 系统角色：从 YAML 解析
-                else cerbos_perms.get(r.name, [])
-            ),
-            binding_count=binding_counts.get(r.name, 0),
-            project_id=r.project_id,
-            created_at=r.created_at.isoformat() if r.created_at else "",
+    out: list[RoleDefOut] = []
+    for r in roles:
+        permissions = _role_permissions(r.name, r.project_id)
+        synced = (
+            r.name in _KEYCLOAK_IDENTITY_ROLES
+            or r.name in index.visible_roles(r.project_id)
         )
-        for r in roles
-    ]
+        out.append(_to_out(r, counts.get(r.name, 0), permissions, synced))
+    return out
 
 
 @router.get("/definitions/{name}", response_model=RoleDetailOut)
@@ -152,49 +191,24 @@ async def get_role_definition(
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
 ) -> RoleDetailOut:
-    """获取单个角色详情（含权限列表）。需要管理员认证。"""
-    stmt = select(RoleDefinition).where(RoleDefinition.name == name)
-    result = await db.execute(stmt)
+    """获取单个角色详情。需要管理员认证。"""
+    result = await db.execute(
+        select(RoleDefinition).where(RoleDefinition.name == name)
+    )
     r = result.scalar_one_or_none()
     if r is None:
         raise HTTPException(status_code=404, detail=f"Role not found: {name}")
 
-    # 解析权限矩阵
-    from services.cerbos_policy_parser import parse_permissions_matrix
-    matrix = parse_permissions_matrix()
-    permissions: list[str] = []
-    if r.name in ("user", "system_admin"):
-        # Keycloak 身份角色：不显示权限
-        permissions = []
-    elif r.permissions:
-        # 自定义角色：取自 DB 中显式存储的权限
-        permissions = list(r.permissions)
-    else:
-        # Cerbos 系统角色：从 YAML 解析
-        for role_info in matrix.get("roles", []):
-            if role_info["name"] == name:
-                permissions = role_info.get("permissions", [])
-                break
-
-    # 绑定计数
-    bc_stmt = select(sa_func.count()).select_from(RoleBinding).where(
-        RoleBinding.role == name,
-        RoleBinding.revoked == False,  # noqa: E712
+    counts = await _binding_counts(db, [name])
+    index = get_policy_index()
+    synced = (
+        name in _KEYCLOAK_IDENTITY_ROLES
+        or name in index.visible_roles(r.project_id)
     )
-    bc_result = await db.execute(bc_stmt)
-    binding_count = bc_result.scalar() or 0
-
     return RoleDetailOut(
-        id=str(r.id),
-        name=r.name,
-        description=r.description or "",
-        parent_keycloak_roles=r.parent_keycloak_roles or [],
-        is_system=r.is_system,
-        is_keycloak_role=(r.name in ("user", "system_admin")),
-        permissions=permissions,
-        binding_count=binding_count,
-        project_id=r.project_id,
-        created_at=r.created_at.isoformat() if r.created_at else "",
+        **_to_out(
+            r, counts.get(name, 0), _role_permissions(name, r.project_id), synced,
+        ).model_dump()
     )
 
 
@@ -206,168 +220,131 @@ async def create_role_definition(
     scope: ProjectScope = Depends(get_project_scope),
     _perm: None = Depends(require_platform_permission("role_mgmt", "platform:write")),
 ) -> RoleDefOut:
-    """创建自定义角色（需 system_admin 权限）。
+    """创建自定义角色。
 
-    同时写入 Cerbos YAML 策略文件，使角色在 Cerbos 判定中生效。
-    project_id=NULL → 平台级角色（所有项目共享）
-    project_id 指定 → 仅该项目可见的角色
+    先写 Cerbos 策略文件再提交数据库；数据库提交失败时回滚文件，
+    避免出现表中有角色而策略中没有的分叉状态。
+
+    project_id=NULL → 平台级角色（写入策略根目录，全部项目可见）
+    project_id 指定 → 项目级角色（写入该项目的策略目录）
     """
-    # 验证项目访问权限
     if body.project_id and not scope.can_access(body.project_id):
-        raise HTTPException(status_code=403, detail=f"No access to project '{body.project_id}'")
+        raise HTTPException(
+            status_code=403, detail=f"No access to project '{body.project_id}'"
+        )
 
-    # 检查是否已存在
-    existing = await db.execute(
-        select(RoleDefinition).where(RoleDefinition.name == body.name)
+    existing = await db.scalar(
+        select(RoleDefinition).where(
+            RoleDefinition.name == body.name,
+            RoleDefinition.project_id.is_(None)
+            if body.project_id is None
+            else RoleDefinition.project_id == body.project_id,
+        )
     )
-    if existing.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail=f"Role already exists: {body.name}")
+    if existing:
+        raise HTTPException(
+            status_code=409, detail=f"Role already exists: {body.name}"
+        )
 
-    # 权限以用户显式指定为准，不自动填充
-    permissions = list(body.permissions) if body.permissions else []
+    # 1. 写策略文件（动作无法归属到资源类型时在此拒绝）
+    try:
+        tx = write_role_policies(
+            body.name, body.parent_keycloak_roles, body.permissions, body.project_id,
+        )
+    except PolicyWriteError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    # 写入 role_definitions 表
+    # 2. 写数据库；失败则回滚文件
     rd = RoleDefinition(
         name=body.name,
         description=body.description or "",
         parent_keycloak_roles=body.parent_keycloak_roles,
-        permissions=permissions,
+        permissions=list(body.permissions),
         is_system=False,
-        project_id=body.project_id,  # NULL=平台级，否则项目级
+        project_id=body.project_id,
     )
-    db.add(rd)
-    await db.commit()
-    await db.refresh(rd)
-
-    # 写入 Cerbos YAML 策略文件
     try:
-        _write_cerbos_yaml_for_role(
-            body.name, body.parent_keycloak_roles, permissions
-        )
-        # P3 修复：Cerbos YAML 变更后失效角色动作映射缓存。
-        from services.cerbos_policy_parser import invalidate_role_actions_cache
-        invalidate_role_actions_cache()
-    except Exception as e:
-        import structlog
-        _logger = structlog.get_logger(__name__)
-        _logger.warning("cerbos_yaml_write_failed", role=body.name, error=str(e)[:200])
-        # YAML 写入失败不阻止角色创建（管理员可手动编辑）
+        db.add(rd)
+        await db.commit()
+        await db.refresh(rd)
+    except Exception as exc:
+        await db.rollback()
+        tx.restore()
+        logger.warning("role_create_rolled_back", role=body.name, error=str(exc)[:200])
+        raise HTTPException(
+            status_code=500, detail=f"Role creation failed, policy files restored: {exc}"
+        ) from exc
 
-    return RoleDefOut(
-        id=str(rd.id),
-        name=rd.name,
-        description=rd.description or "",
-        parent_keycloak_roles=rd.parent_keycloak_roles or [],
-        is_system=rd.is_system,
-        is_keycloak_role=False,
-        permissions=list(rd.permissions) if rd.permissions else [],
-        binding_count=0,
-        project_id=rd.project_id,
-        created_at=rd.created_at.isoformat() if rd.created_at else "",
+    invalidate_role_actions_cache()
+    return _to_out(rd, 0, _role_permissions(rd.name, rd.project_id), True)
+
+
+@router.put("/definitions/{name}", response_model=RoleDefOut)
+async def update_role_definition(
+    name: str,
+    body: UpdateRoleRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("role_mgmt", "platform:write")),
+) -> RoleDefOut:
+    """更新自定义角色的描述、父角色与权限。
+
+    补齐原先缺失的更新入口：此前修改权限只能删除重建，而有活跃绑定的角色
+    不允许删除，导致这类角色的权限无法调整。
+
+    内置角色（is_system=true）不可更新：其策略条件由手工维护，
+    生成器无法复现（例如 rag_roles 中读 granted_actions 的表达式）。
+    """
+    r = await db.scalar(select(RoleDefinition).where(RoleDefinition.name == name))
+    if r is None:
+        raise HTTPException(status_code=404, detail=f"Role not found: {name}")
+    if r.is_system:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Role '{name}' is a system role; edit its policy file directly.",
+        )
+    if r.project_id and not scope.can_access(r.project_id):
+        raise HTTPException(
+            status_code=403, detail=f"No access to project '{r.project_id}'"
+        )
+
+    parents = (
+        body.parent_keycloak_roles
+        if body.parent_keycloak_roles is not None
+        else (r.parent_keycloak_roles or ["user"])
+    )
+    permissions = (
+        body.permissions
+        if body.permissions is not None
+        else list(r.permissions or [])
     )
 
+    try:
+        tx = write_role_policies(name, parents, permissions, r.project_id)
+    except PolicyWriteError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-def _cleanup_cerbos_yaml_for_role(name: str) -> None:
-    """删除角色时清理对应的 Cerbos YAML 文件。"""
-    from app.config import get_cerbos_policies_dir
-    policies_dir = str(get_cerbos_policies_dir())
+    try:
+        if body.description is not None:
+            r.description = body.description
+        r.parent_keycloak_roles = parents
+        r.permissions = permissions
+        await db.commit()
+        await db.refresh(r)
+    except Exception as exc:
+        await db.rollback()
+        tx.restore()
+        logger.warning("role_update_rolled_back", role=name, error=str(exc)[:200])
+        raise HTTPException(
+            status_code=500, detail=f"Role update failed, policy files restored: {exc}"
+        ) from exc
 
-    # 清理 derived_roles YAML 中的条目
-    dr_path = _os.path.join(policies_dir, "derived_roles", "custom_roles.yaml")
-    if _os.path.exists(dr_path):
-        with open(dr_path) as f:
-            content = f.read()
-        # 移除该角色的定义块
-        pattern = rf"    - name: {_re.escape(name)}\n.*?(?=\n    - name: |\Z)"
-        new_content = _re.sub(pattern, "", content, flags=_re.DOTALL)
-        new_content = _re.sub(r"\n{3,}", "\n\n", new_content)  # 清理多余空行
-        with open(dr_path, "w") as f:
-            f.write(new_content)
-
-    # 清理 resource_policies YAML 文件
-    rp_dir = _os.path.join(policies_dir, "resource_policies")
-    if _os.path.exists(rp_dir):
-        for suffix in [f"custom_kb_{name}.yaml", f"custom_doc_{name}.yaml"]:
-            path = _os.path.join(rp_dir, suffix)
-            if _os.path.exists(path):
-                _os.remove(path)
-
-
-def _write_cerbos_yaml_for_role(
-    name: str, parent_roles: list[str], permissions: list[str],
-) -> None:
-    """为自定义角色生成 Cerbos YAML 策略文件。"""
-    import os as _os
-
-    from app.config import get_cerbos_policies_dir
-    policies_dir = str(get_cerbos_policies_dir())
-
-    # ── 1. Derived roles ──
-    dr_dir = _os.path.join(policies_dir, "derived_roles")
-    _os.makedirs(dr_dir, exist_ok=True)
-    custom_dr_path = _os.path.join(dr_dir, "custom_roles.yaml")
-
-    existing_dr = ""
-    if _os.path.exists(custom_dr_path):
-        with open(custom_dr_path) as f:
-            existing_dr = f.read()
-
-    dr_entry = f"""    - name: {name}
-      parentRoles: {parent_roles}
-      condition:
-        match:
-          expr: "true"
-"""
-
-    if name not in existing_dr:
-        if not existing_dr:
-            new_dr = f"""# Auto-generated custom roles - DO NOT EDIT MANUALLY
-# Managed by Permission Service role management API
-apiVersion: api.cerbos.dev/v1
-derivedRoles:
-  name: custom_roles
-  definitions:
-{dr_entry}"""
-        else:
-            new_dr = existing_dr.rstrip() + "\n" + dr_entry
-        with open(custom_dr_path, "w") as f:
-            f.write(new_dr)
-
-    # ── 2. Resource policies ──
-    kb_actions = [p for p in permissions if p.startswith("kb:")]
-    doc_actions = [p for p in permissions if p.startswith("doc:")]
-
-    rp_dir = _os.path.join(policies_dir, "resource_policies")
-    _os.makedirs(rp_dir, exist_ok=True)
-
-    if kb_actions:
-        _append_resource_policy(rp_dir, f"custom_kb_{name}.yaml",
-                               "kb", name, kb_actions)
-
-    if doc_actions:
-        _append_resource_policy(rp_dir, f"custom_doc_{name}.yaml",
-                               "document", name, doc_actions)
-
-
-def _append_resource_policy(rp_dir: str, filename: str,
-                            resource: str, role: str, actions: list[str]) -> None:
-    """生成单个资源策略 YAML 文件。"""
-    import os as _os
-    path = _os.path.join(rp_dir, filename)
-    yaml_content = f"""# Auto-generated custom role policy for {role}
-apiVersion: api.cerbos.dev/v1
-resourcePolicy:
-  version: "default"
-  resource: "{resource}"
-  importDerivedRoles:
-    - custom_roles
-  rules:
-    - actions: {actions}
-      effect: EFFECT_ALLOW
-      derivedRoles: ["{role}"]
-"""
-    with open(path, "w") as f:
-        f.write(yaml_content)
+    invalidate_role_actions_cache()
+    counts = await _binding_counts(db, [name])
+    return _to_out(
+        r, counts.get(name, 0), _role_permissions(name, r.project_id), True,
+    )
 
 
 @router.delete("/definitions/{name}", status_code=204)
@@ -375,58 +352,66 @@ async def delete_role_definition(
     name: str,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("role_mgmt", "platform:write")),
 ) -> None:
-    """删除自定义角色（系统内置角色不可删除）。"""
-    stmt = select(RoleDefinition).where(RoleDefinition.name == name)
-    result = await db.execute(stmt)
-    r = result.scalar_one_or_none()
+    """删除自定义角色（系统内置角色不可删除）。
+
+    先清理策略文件再删除数据库记录；数据库失败时还原文件，
+    避免出现策略中已无该角色而表中仍存在的分叉状态。
+    """
+    r = await db.scalar(select(RoleDefinition).where(RoleDefinition.name == name))
     if r is None:
         raise HTTPException(status_code=404, detail=f"Role not found: {name}")
     if r.is_system:
         raise HTTPException(
-            status_code=403,
-            detail=f"System role '{name}' cannot be deleted.",
+            status_code=403, detail=f"Cannot delete system role: {name}"
+        )
+    if r.project_id and not scope.can_access(r.project_id):
+        raise HTTPException(
+            status_code=403, detail=f"No access to project '{r.project_id}'"
         )
 
-    # 检查是否有活跃绑定
-    bc_stmt = select(sa_func.count()).select_from(RoleBinding).where(
-        RoleBinding.role == name,
-        RoleBinding.revoked == False,  # noqa: E712
-    )
-    bc_result = await db.execute(bc_stmt)
-    if (bc_result.scalar() or 0) > 0:
+    counts = await _binding_counts(db, [name])
+    if counts.get(name, 0) > 0:
         raise HTTPException(
             status_code=409,
-            detail=f"Cannot delete role '{name}': it has active bindings. Unbind all users first.",
+            detail=(
+                f"Cannot delete role '{name}': it has active bindings. "
+                "Unbind all users first."
+            ),
         )
 
-    await db.delete(r)
-    await db.commit()
-
-    # 清理 Cerbos YAML 策略文件
     try:
-        _cleanup_cerbos_yaml_for_role(name)
-        # P3 修复：Cerbos YAML 变更后失效角色动作映射缓存。
-        from services.cerbos_policy_parser import invalidate_role_actions_cache
-        invalidate_role_actions_cache()
-    except Exception as e:
-        import structlog
-        _logger = structlog.get_logger(__name__)
-        _logger.warning("cerbos_yaml_cleanup_failed", role=name, error=str(e)[:200])
+        tx = remove_role_policies(name, r.project_id)
+    except PolicyWriteError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    try:
+        await db.delete(r)
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        tx.restore()
+        logger.warning("role_delete_rolled_back", role=name, error=str(exc)[:200])
+        raise HTTPException(
+            status_code=500, detail=f"Role deletion failed, policy files restored: {exc}"
+        ) from exc
+
+    invalidate_role_actions_cache()
+
 
 @router.get("/permissions", response_model=PermissionMatrixOut)
 async def get_permissions_matrix(
     project_id: str | None = Query(None, description="项目 ID，不传则返回全部"),
     admin: Principal = Depends(get_current_admin),
 ) -> PermissionMatrixOut:
-    """获取角色-权限矩阵（从 Cerbos 策略 YAML 解析）。需要管理员认证。
+    """获取角色-权限矩阵（从 Cerbos 策略解析）。需要管理员认证。
 
-    - project_id 指定 → 仅返回该项目的 Cerbos 派生角色
-    - project_id 不传 → 返回全部项目
-    仅包含 Cerbos 派生角色，不含 Keycloak 身份角色。
+    - project_id 指定 → 该项目的角色加无项目归属的角色
+    - project_id 不传 → 全部项目
+    仅包含策略中直接出现的角色，不含 Keycloak 身份角色。
     """
-    from services.cerbos_policy_parser import parse_permissions_matrix
-    matrix = parse_permissions_matrix(project_id=project_id if project_id else None)
-    # 过滤掉 Keycloak 身份角色
+    matrix = parse_permissions_matrix(project_id or None)
     matrix["roles"] = [r for r in matrix["roles"] if r.get("source") != "keycloak"]
     return PermissionMatrixOut(**matrix)

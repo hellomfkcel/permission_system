@@ -56,7 +56,10 @@ class ResourceRegistry(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("resource_type", "resource_id", name="uq_resource_type_id"),
+        UniqueConstraint(
+            "project_id", "resource_type", "resource_id",
+            name="uq_resource_project_type_id",
+        ),
         Index(
             "idx_resource_project",
             "project_id",

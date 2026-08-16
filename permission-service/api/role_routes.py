@@ -37,6 +37,11 @@ class UnbindRoleRequest(BaseModel):
     role: str
     resource_type: str | None = None
     resource_id: str | None = None
+    project_id: str | None = Field(
+        None,
+        description="所属项目 ID。唯一性按项目隔离后，跨项目同名角色需靠此定位；"
+                    "不传时要求匹配结果唯一。",
+    )
 
 
 class RoleBindingOut(BaseModel):
@@ -68,8 +73,9 @@ async def bind_role(
     if not scope.can_access(body.project_id):
         raise HTTPException(status_code=403, detail=f"No access to project '{body.project_id}'")
 
-    # 检查重复
+    # 检查重复（唯一性按项目隔离）
     stmt = select(RoleBinding).where(
+        RoleBinding.project_id == body.project_id,
         RoleBinding.principal == body.principal,
         RoleBinding.role == body.role,
     )
@@ -143,16 +149,27 @@ async def unbind_role(
         RoleBinding.role == body.role,
         RoleBinding.revoked == False,  # noqa: E712
     )
+    if body.project_id:
+        stmt = stmt.where(RoleBinding.project_id == body.project_id)
     if body.resource_type:
         stmt = stmt.where(RoleBinding.resource_type == body.resource_type)
     if body.resource_id:
         stmt = stmt.where(RoleBinding.resource_id == body.resource_id)
 
     result = await db.execute(stmt)
-    binding = result.scalar_one_or_none()
+    bindings = result.scalars().all()
 
-    if not binding:
+    if not bindings:
         raise HTTPException(status_code=404, detail="binding not found")
+    if len(bindings) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Multiple bindings match across projects: "
+                f"{sorted({b.project_id for b in bindings})}. Specify project_id."
+            ),
+        )
+    binding = bindings[0]
 
     # 验证项目访问权限
     if not scope.can_access(binding.project_id):
