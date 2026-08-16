@@ -50,8 +50,8 @@ class ACLEntry(Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "principal", "resource_type", "resource_id", "action",
-            name="uq_acl_principal_resource_action",
+            "project_id", "principal", "resource_type", "resource_id", "action",
+            name="uq_acl_project_principal_resource_action",
         ),
         Index(
             "idx_acl_resource",

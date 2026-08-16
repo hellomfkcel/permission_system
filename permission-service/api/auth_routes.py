@@ -32,10 +32,20 @@ _ADMIN_ROLES: set[str] = {"system_admin", "admin"}
 _PLATFORM_ADMIN_ROLE = "platform_admin"
 
 
+def _is_platform_wide(roles: list[str]) -> bool:
+    """是否具有跨项目的平台级身份。
+
+    platform_admin 与 system_admin / admin 一致对待：三者在 get_current_admin
+    与 require_platform_permission 中都按全权处理，项目范围也须同口径，
+    否则会出现"认证通过、平台权限通过、项目范围拒绝"的 403。
+    """
+    return _PLATFORM_ADMIN_ROLE in roles or bool(_ADMIN_ROLES.intersection(roles))
+
+
 async def get_admin_project_ids(user_id: str, roles: list[str]) -> set[str] | None:
     """获取管理员用户可访问的项目 ID 集合。
 
-    - platform_admin → 返回 None（表示"全部项目"，不设过滤）
+    - 平台级身份（platform_admin / system_admin / admin）→ 返回 None（全部项目）
     - 其他用户 → 查询 project_members 表
 
     project_members.user_id 存的是 Keycloak UUID，而 JWT sub 可能是用户名。
@@ -45,8 +55,8 @@ async def get_admin_project_ids(user_id: str, roles: list[str]) -> set[str] | No
         None: 平台超管，可访问全部项目
         set[str]: 该管理员所属的项目 ID 集合（可能为空集）
     """
-    # platform_admin → 全部项目
-    if _PLATFORM_ADMIN_ROLE in roles:
+    # 平台级身份 → 全部项目
+    if _is_platform_wide(roles):
         return None
 
     from app.database import async_session
@@ -258,8 +268,10 @@ async def get_project_scope(
         ProjectScope 对象，封装了项目访问范围。
     """
     project_ids = await get_admin_project_ids(admin.user_id, admin.roles)
-    is_platform = _PLATFORM_ADMIN_ROLE in admin.roles
-    return ProjectScope(project_ids=project_ids, is_platform_admin=is_platform)
+    return ProjectScope(
+        project_ids=project_ids,
+        is_platform_admin=_is_platform_wide(admin.roles),
+    )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -419,7 +431,7 @@ async def get_my_platform_access(
     from app.platform_features import PLATFORM_FEATURES
     from app.database import async_session
 
-    is_platform_admin = _PLATFORM_ADMIN_ROLE in admin.roles or "system_admin" in admin.roles
+    is_platform_admin = _is_platform_wide(admin.roles)
 
     async with async_session() as db:
         perms = await _get_platform_permissions(db, admin.user_id, admin.roles)

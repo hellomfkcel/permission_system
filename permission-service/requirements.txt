@@ -14,12 +14,18 @@ alembic>=1.13.0
 # HTTP 客户端
 httpx>=0.25.0
 
+# 表单/文件上传（ACL CSV 导入、策略文件上传端点依赖）
+python-multipart>=0.0.9
+
 # 认证
 python-jose[cryptography]>=3.3.0
 
 # 数据验证
 pydantic>=2.0
 pydantic-settings>=2.0
+
+# YAML 解析（Cerbos 策略索引）
+PyYAML>=6.0
 
 # Redis
 redis>=5.0

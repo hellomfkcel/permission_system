@@ -48,8 +48,8 @@ class RoleBinding(Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "principal", "role", "resource_type", "resource_id",
-            name="uq_role_binding",
+            "project_id", "principal", "role", "resource_type", "resource_id",
+            name="uq_role_binding_project",
         ),
         Index(
             "idx_role_binding_project",

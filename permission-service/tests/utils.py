@@ -3,11 +3,23 @@
 import os
 import time
 import uuid
+from pathlib import Path
 
 from jose import jwt
 
-JWT_PRIVATE_KEY_PATH = "/home/mfkcel/proj_rag_dev/config/jwt_private.pem"
+# 测试用 JWT 私钥。默认取仓库内 permission-service/config/jwt_private.pem，
+# 可用 TEST_JWT_PRIVATE_KEY_PATH 覆盖（例如与被测服务共用同一密钥对）。
+JWT_PRIVATE_KEY_PATH = os.getenv(
+    "TEST_JWT_PRIVATE_KEY_PATH",
+    str(Path(__file__).resolve().parent.parent / "config" / "jwt_private.pem"),
+)
 BASE_URL = os.getenv("TEST_BASE_URL", "http://localhost:18080")
+
+# /v1/* 服务间端点的预共享密钥，须与被测服务的 SERVICE_API_KEY 一致
+SERVICE_API_KEY = os.getenv("SERVICE_API_KEY", "")
+
+# 管理面写操作要求的项目 ID（与首启动引导建立的项目一致）
+TEST_PROJECT_ID = os.getenv("TEST_PROJECT_ID", "rag-v14")
 
 
 def make_token(

@@ -127,6 +127,7 @@ def test_check_allow_after_grant(api, test_token, headers, admin_headers, unique
         "resource_id": kb_id,
         "action": "kb:read",
         "granted_by": "admin",
+        "project_id": "rag-v14",
     }, headers=admin_headers)
 
     # check 应返回 allow
@@ -166,6 +167,7 @@ def test_check_subject_ban(api, test_token, headers, admin_headers, unique_id):
         "principal": ban_principal,
         "reason": "Test ban",
         "created_by": "admin",
+        "project_id": "rag-v14",
     }, headers=admin_headers)
 
     # check 应返回 deny
@@ -195,6 +197,7 @@ def test_prefilter_suspended(api, admin_headers, unique_id):
         "principal": ban_principal,
         "reason": "Test",
         "created_by": "admin",
+        "project_id": "rag-v14",
     }, headers=admin_headers)
 
     resp = api.get(f"/v1/prefilter?credential={ban_token}")
@@ -347,6 +350,7 @@ def test_acl_grant_version_bump(api, admin_headers, unique_id):
         "resource_id": kb_id,
         "action": "kb:read",
         "granted_by": "admin",
+        "project_id": "rag-v14",
     }, headers=admin_headers)
     assert resp1.status_code == 200
     v1 = resp1.json()["version"]
@@ -359,6 +363,7 @@ def test_acl_grant_version_bump(api, admin_headers, unique_id):
         "resource_id": kb_id,
         "action": "kb:write",
         "granted_by": "admin",
+        "project_id": "rag-v14",
     }, headers=admin_headers)
     assert resp2.status_code == 200
     v2 = resp2.json()["version"]
@@ -387,6 +392,7 @@ def test_role_bind_unbind(api, admin_headers, unique_id):
         "principal": principal,
         "role": "kb_reader",
         "granted_by": "admin",
+        "project_id": "rag-v14",
     }, headers=admin_headers)
     assert resp.status_code == 200
     assert resp.json()["result"] == "bound"
@@ -412,6 +418,7 @@ def test_restriction_add_remove(api, admin_headers, unique_id):
         "principal": principal,
         "reason": "Test",
         "created_by": "admin",
+        "project_id": "rag-v14",
     }, headers=admin_headers)
     assert resp.status_code == 200
     assert "restriction_id" in resp.json()
@@ -484,6 +491,7 @@ def test_filter_type2_restriction(api, test_token, headers, admin_headers, uniqu
         "tenant_id": "tenant-test", "principal": "user:test-user",
         "resource_type": "kb", "resource_id": kb_id,
         "action": "kb:read", "granted_by": "admin",
+        "project_id": "rag-v14",
     }, headers=admin_headers)
 
     # 型二封禁：限制 test-user 访问该文档
@@ -492,6 +500,7 @@ def test_filter_type2_restriction(api, test_token, headers, admin_headers, uniqu
         "principal": "user:test-user", "resource_type": "document",
         "resource_id": doc_id, "reason": "Test type-2 restriction",
         "created_by": "admin",
+        "project_id": "rag-v14",
     }, headers=admin_headers)
 
     # filter 应将 test-user 对该文档的访问判为 deny
@@ -529,6 +538,7 @@ def test_acl_grant_kb_channel_kb(api, admin_headers, unique_id):
         "tenant_id": "tenant-test", "principal": "group:eng",
         "resource_type": "kb", "resource_id": kb_id,
         "action": "kb:read", "granted_by": "admin",
+        "project_id": "rag-v14",
     }, headers=admin_headers)
     assert resp.status_code == 200
 
@@ -576,6 +586,7 @@ def test_prefilter_tenant_isolation(api, admin_headers, unique_id):
         "tenant_id": "tenant-a", "principal": f"user:user-a-{unique_id}",
         "resource_type": "kb", "resource_id": kb_a,
         "action": "kb:read", "granted_by": "admin",
+        "project_id": "rag-v14",
     }, headers=make_admin_headers(tenant="tenant-a"))
 
     # 在 tenant-b 注册 KB 并授予 user-b
@@ -588,6 +599,7 @@ def test_prefilter_tenant_isolation(api, admin_headers, unique_id):
         "tenant_id": "tenant-b", "principal": f"user:user-b-{unique_id}",
         "resource_type": "kb", "resource_id": kb_b,
         "action": "kb:read", "granted_by": "admin",
+        "project_id": "rag-v14",
     }, headers=make_admin_headers(tenant="tenant-b"))
 
     # user-a 的 prefilter 不应包含 tenant-b 的 KB
@@ -617,6 +629,7 @@ def test_acl_grant_atomic_change_log(api, admin_headers, unique_id):
         "tenant_id": "tenant-test", "principal": "group:atomic-test",
         "resource_type": "kb", "resource_id": kb_id,
         "action": "kb:read", "granted_by": "admin",
+        "project_id": "rag-v14",
     }, headers=admin_headers)
     assert resp.status_code == 200
     version = resp.json()["version"]

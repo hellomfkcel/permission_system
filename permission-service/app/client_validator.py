@@ -132,21 +132,23 @@ def _get_client_id(request: Request) -> str | None:
     return request.headers.get("X-Client-Id") or request.headers.get("x-client-id")
 
 
-async def validate_client_id(path: str, client_id: str | None) -> str | None:
+async def validate_client_id(
+    path: str, client_id: str | None,
+) -> tuple[str | None, JSONResponse | None]:
     """校验 client_id 是否在 project_clients 表中注册。
 
-    Phase 1: 替代硬编码 ALLOWED_CLIENTS，改为从 DB 查询 + 缓存。
+    从 project_clients 表查询 + 60s 缓存，替代早期的硬编码 ALLOWED_CLIENTS。
+
+    以返回值而非异常表达失败：BaseHTTPMiddleware 在路由的异常处理链之外运行，
+    在其中 raise HTTPException 不会被转换成 403 响应，只会冒泡成 500。
 
     Returns:
-        匹配到的 project_id，用于注入 request.state.project_id。
-
-    Raises:
-        HTTPException(403): client_id 不在注册表中。
+        (project_id, None) 校验通过；(None, JSONResponse) 校验失败时的 403 响应。
     """
     if client_id is None:
-        raise HTTPException(
+        return None, JSONResponse(
             status_code=403,
-            detail={
+            content={
                 "error": "missing_client_id",
                 "message": "X-Client-Id header is required for this endpoint.",
             },
@@ -154,16 +156,16 @@ async def validate_client_id(path: str, client_id: str | None) -> str | None:
 
     cache = await _refresh_client_cache()
     if client_id in cache:
-        return cache[client_id]
+        return cache[client_id], None
 
     logger.warning(
         "client_id_rejected",
         path=path,
         client_id=client_id,
     )
-    raise HTTPException(
+    return None, JSONResponse(
         status_code=403,
-        detail={
+        content={
             "error": "invalid_client_id",
             "message": (
                 f"Client-ID '{client_id}' is not registered. "
@@ -224,11 +226,12 @@ class ClientIdValidationMiddleware(BaseHTTPMiddleware):
 
         client_id = _get_client_id(request)
 
-        # Phase 1: 从 project_clients 表校验 client_id（替代硬编码 ALLOWED_CLIENTS）
-        try:
-            project_id_from_client = await validate_client_id(path, client_id)
-        except HTTPException:
-            raise  # 重新抛出 403
+        # 从 project_clients 表校验 client_id
+        project_id_from_client, error_response = await validate_client_id(
+            path, client_id,
+        )
+        if error_response is not None:
+            return error_response
 
         # ★ P4 修复：API key 和 client_id 必须属于同一项目
         # 防止跨项目混用：RAG 的 API key + demo 的 client_id 必须被拒绝

@@ -7,7 +7,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -93,6 +93,7 @@ class ResourceOut(BaseModel):
 
 @router.get("", response_model=list[ResourceOut])
 async def list_resources(
+    request: Request,
     type: str | None = Query(None, alias="type", description="资源类型: kb | document"),
     tenant_id: str | None = Query(None, description="租户 ID 过滤"),
     resource_id: str | None = Query(None, description="精确查询: 资源 ID"),
@@ -104,6 +105,10 @@ async def list_resources(
     管理台资源浏览请使用 /api/v1/resources（需 admin 认证）。
     """
     conditions = []
+    # 调用方只能看到自己项目的资源（project_id 由准入中间件注入）
+    caller_project = getattr(request.state, "project_id", None)
+    if caller_project is not None:
+        conditions.append(ResourceRegistry.project_id == caller_project)
     if type:
         conditions.append(ResourceRegistry.resource_type == type)
     if tenant_id:
@@ -112,7 +117,7 @@ async def list_resources(
         conditions.append(ResourceRegistry.resource_id == resource_id)
 
     # 安全：无过滤条件时拒绝空查询（防止枚举全部资源）
-    if not conditions:
+    if not (type or tenant_id or resource_id):
         raise HTTPException(
             status_code=422,
             detail="At least one filter (type, tenant_id, or resource_id) is required",
@@ -157,13 +162,15 @@ async def register_resource(
     # 幂等键格式校验
     _validate_idempotency_key(body.idempotency_key, "register")
 
-    # 检查是否已存在（幂等）
+    # 检查是否已存在（幂等）。按项目查询：资源唯一性是 (项目, 类型, ID)，
+    # 不同项目可以使用同名资源类型与相同资源 ID。
     stmt = select(ResourceRegistry).where(
+        ResourceRegistry.project_id == body.project_id,
         ResourceRegistry.resource_type == body.resource_type,
         ResourceRegistry.resource_id == body.resource_id,
     )
     result = await db.execute(stmt)
-    existing = result.scalar_one_or_none()
+    existing = result.scalars().first()
 
     if existing:
         # 已存在 → 验证是否同 payload
@@ -372,11 +379,12 @@ async def retire_resource(
     _validate_idempotency_key(body.idempotency_key, "retire")
 
     stmt = select(ResourceRegistry).where(
+        ResourceRegistry.project_id == body.project_id,
         ResourceRegistry.resource_type == body.resource_type,
         ResourceRegistry.resource_id == body.resource_id,
     )
     result = await db.execute(stmt)
-    resource = result.scalar_one_or_none()
+    resource = result.scalars().first()
 
     if not resource:
         raise HTTPException(status_code=404, detail="resource not found")
@@ -458,6 +466,7 @@ class UpdateResourceAttrRequest(BaseModel):
 
 @router.patch("/{resource_type}/{resource_id}", response_model=LifecycleResponse)
 async def update_resource_attr(
+    request: Request,
     resource_type: str,
     resource_id: str,
     body: UpdateResourceAttrRequest,
@@ -468,12 +477,15 @@ async def update_resource_attr(
     B-DOC 在 MountEnabledChanged 事件处理时调用，同步 is_enabled/allow_download 到权限服务。
     设计依据：docs/RAG系统设计v14.md §13.4.1 + §14.5.1。
     """
-    stmt = select(ResourceRegistry).where(
+    conditions = [
         ResourceRegistry.resource_type == resource_type,
         ResourceRegistry.resource_id == resource_id,
-    )
-    result = await db.execute(stmt)
-    resource = result.scalar_one_or_none()
+    ]
+    caller_project = getattr(request.state, "project_id", None)
+    if caller_project is not None:
+        conditions.append(ResourceRegistry.project_id == caller_project)
+    result = await db.execute(select(ResourceRegistry).where(*conditions))
+    resource = result.scalars().first()
 
     if not resource:
         raise HTTPException(status_code=404, detail="resource not found")
@@ -545,6 +557,7 @@ class ResourceOwnerResponse(BaseModel):
 async def get_resource_owners(
     resource_type: str,
     resource_id: str,
+    request: Request = None,
     db: AsyncSession = Depends(get_db),
 ):
     """查询资源所有者信息。
@@ -552,12 +565,15 @@ async def get_resource_owners(
     管理台用于展示资源的所有权归属。
     设计依据：docs/外部系统设计.md §2.4.4。
     """
-    stmt = select(ResourceRegistry).where(
+    conditions = [
         ResourceRegistry.resource_type == resource_type,
         ResourceRegistry.resource_id == resource_id,
-    )
-    result = await db.execute(stmt)
-    resource = result.scalar_one_or_none()
+    ]
+    caller_project = getattr(request.state, "project_id", None) if request else None
+    if caller_project is not None:
+        conditions.append(ResourceRegistry.project_id == caller_project)
+    result = await db.execute(select(ResourceRegistry).where(*conditions))
+    resource = result.scalars().first()
 
     if not resource:
         raise HTTPException(status_code=404, detail="resource not found")

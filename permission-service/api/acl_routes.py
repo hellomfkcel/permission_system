@@ -22,6 +22,8 @@ from schemas.responses import Principal
 from app.role_actions_config import (
     VALID_ACTIONS,
     VALID_RESOURCE_TYPES,
+    get_valid_actions,
+    get_valid_resource_types,
 )
 
 router = APIRouter(prefix="/api/v1/acl", tags=["admin-acl"])
@@ -51,6 +53,11 @@ class RevokeRequest(BaseModel):
     resource_type: str
     resource_id: str
     action: str
+    project_id: str | None = Field(
+        None,
+        description="所属项目 ID。唯一性按项目隔离后，跨项目同名资源需靠此定位；"
+                    "不传时要求匹配结果唯一。",
+    )
 
 
 class ACLEntryOut(BaseModel):
@@ -98,8 +105,9 @@ async def grant_acl(
     if not proj:
         raise HTTPException(status_code=404, detail=f"Project '{body.project_id}' not found")
 
-    # 检查重复
+    # 检查重复（唯一性按项目隔离，不同项目的同名资源互不冲突）
     stmt = select(ACLEntry).where(
+        ACLEntry.project_id == body.project_id,
         ACLEntry.principal == body.principal,
         ACLEntry.resource_type == body.resource_type,
         ACLEntry.resource_id == body.resource_id,
@@ -175,18 +183,29 @@ async def revoke_acl(
     _perm: None = Depends(require_platform_permission("permission_mgmt", "platform:write")),
 ) -> dict:
     """回收权限（需要管理员认证）。"""
-    stmt = select(ACLEntry).where(
+    conditions = [
         ACLEntry.principal == body.principal,
         ACLEntry.resource_type == body.resource_type,
         ACLEntry.resource_id == body.resource_id,
         ACLEntry.action == body.action,
         ACLEntry.revoked == False,  # noqa: E712
-    )
-    result = await db.execute(stmt)
-    entry = result.scalar_one_or_none()
+    ]
+    if body.project_id:
+        conditions.append(ACLEntry.project_id == body.project_id)
+    result = await db.execute(select(ACLEntry).where(*conditions))
+    entries = result.scalars().all()
 
-    if not entry:
+    if not entries:
         raise HTTPException(status_code=404, detail="grant not found")
+    if len(entries) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Multiple grants match across projects: "
+                f"{sorted({e.project_id for e in entries})}. Specify project_id."
+            ),
+        )
+    entry = entries[0]
 
     # 验证项目访问权限
     if not scope.can_access(entry.project_id):
@@ -485,9 +504,8 @@ class CSVImportResult(BaseModel):
     errors: list[dict] = Field(default_factory=list)
 
 
-# 有效的 action 值（设计依据：app/role_actions_config.py）
-_VALID_ACTIONS = VALID_ACTIONS
-_VALID_RESOURCE_TYPES = VALID_RESOURCE_TYPES
+# 有效的 action / resource_type 取值随目标项目的 Cerbos 策略变化，
+# 在导入时按 project_id 动态解析，不使用 kb/doc 硬编码集合。
 
 
 @router.post("/import-csv", response_model=CSVImportResult)
@@ -543,6 +561,10 @@ async def import_acl_csv(
     if len(rows) > 1000:
         raise HTTPException(status_code=422, detail=f"Max 1000 rows per import, got {len(rows)}")
 
+    # 目标项目的合法取值（来自该项目的 Cerbos 资源策略）
+    valid_actions = get_valid_actions(project_id)
+    valid_resource_types = get_valid_resource_types(project_id)
+
     total_rows = len(rows)
     success = 0
     skipped = 0
@@ -561,12 +583,18 @@ async def import_acl_csv(
         row_errors = []
         if not principal:
             row_errors.append("principal is required")
-        if resource_type not in _VALID_RESOURCE_TYPES:
-            row_errors.append(f"resource_type '{resource_type}' is invalid (must be: kb, document)")
+        if resource_type not in valid_resource_types:
+            row_errors.append(
+                f"resource_type '{resource_type}' is not defined in project "
+                f"'{project_id}' policies (available: {', '.join(sorted(valid_resource_types))})"
+            )
         if not resource_id:
             row_errors.append("resource_id is required")
-        if action not in _VALID_ACTIONS:
-            row_errors.append(f"action '{action}' is invalid (must be one of: {', '.join(sorted(_VALID_ACTIONS))})")
+        if action not in valid_actions:
+            row_errors.append(
+                f"action '{action}' is not defined in project '{project_id}' policies "
+                f"(available: {', '.join(sorted(valid_actions))})"
+            )
 
         # 过期时间解析
         expires_at = None

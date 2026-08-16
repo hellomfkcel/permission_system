@@ -41,6 +41,19 @@ def _now_iso():
 def upgrade() -> None:
     conn = op.get_bind()
 
+    # dddcf4c5164c 创建 role_definitions 时未包含 permissions 列，
+    # 而下面的种子数据要写入它。此处补建，使空库可以完整执行迁移链。
+    op.execute(
+        "ALTER TABLE role_definitions "
+        "ADD COLUMN IF NOT EXISTS permissions JSONB NOT NULL DEFAULT '[]'::jsonb"
+    )
+
+    # 平台级授权（platform 资源的 ACL、平台角色绑定）不属于任何项目，
+    # 以 project_id IS NULL 表示，与 role_definitions 的平台级语义一致。
+    # 2b3c4d5e6f7a 把这两列设为 NOT NULL，与此处的种子数据冲突，故放开。
+    op.execute("ALTER TABLE acl_entries ALTER COLUMN project_id DROP NOT NULL")
+    op.execute("ALTER TABLE role_bindings ALTER COLUMN project_id DROP NOT NULL")
+
     # ══════════════════════════════════════════════════════════
     # 1. 插入平台级角色定义（project_id=NULL）
     # ══════════════════════════════════════════════════════════
@@ -130,10 +143,13 @@ def upgrade() -> None:
     # ══════════════════════════════════════════════════════════
     # 4. 确保 admin 用户在 project_members 中
     # ══════════════════════════════════════════════════════════
+    # 仅当项目已存在时插入（project_members.project_id 有外键约束）。
+    # 空库迁移时 projects 表为空，此步跳过；首启动引导会补建成员关系。
     conn.execute(
         sa.text("""
             INSERT INTO project_members (id, project_id, user_id, role, granted_by, created_at)
-            VALUES (:id, 'rag-v14', 'admin', 'project_admin', 'system:seed', :now)
+            SELECT :id, p.id, 'admin', 'project_admin', 'system:seed', :now
+            FROM projects p WHERE p.id = 'rag-v14'
             ON CONFLICT (project_id, user_id) DO NOTHING
         """),
         {
