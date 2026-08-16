@@ -53,17 +53,49 @@
   visibility_changed    (Next.js 14)           (perm-service-client)
 ```
 
-### 2.2 三层分工与拆分理由
+### 2.2 组件分工
 
-| 层 | 承担 | 不承担 | 拆分理由 |
-|----|------|--------|----------|
-| Keycloak | 身份、凭据、组织结构、JWT 签发 | 资源级授权 | 身份数据与授权数据的变更频率、责任人不同；IdP 的组织模型不表达资源粒度授权 |
-| 权限服务 | 授权数据存储、判定编排、项目与租户管理 | 规则表达 | 授权记录高频变更且需要事务一致性与索引，不适合写入策略文件 |
-| Cerbos PDP | 规则求值 | 授权数据持久化 | 策略与代码分离、热加载；新项目接入只需新增 YAML，不改服务端代码 |
+| 组件 | 承担 | 拆分理由 |
+|------|------|----------|
+| Keycloak | 身份、凭据、组织结构、JWT 签发 | 身份数据与授权数据的变更频率、责任人不同；IdP 的组织模型不表达资源粒度授权 |
+| 权限服务 | 授权数据存储、判定编排、项目与租户管理，以及策略文件的解析 | 授权记录高频变更且需要事务一致性与索引，不适合写入策略文件 |
+| Cerbos PDP | 规则求值 | 策略与代码分离、热加载；新项目接入只需新增 YAML，不改服务端代码 |
 
-平台的可扩展性来自这条分界：新增业务系统时，变化落在项目自己的策略 YAML 与授权数据上，判定链路的代码路径不变。
+策略文件不是 Cerbos 独占的输入。权限服务同样读取并解析同一批 YAML，机制见 §2.3。
 
-### 2.3 项目作为隔离单元
+### 2.3 策略文件的两个消费者
+
+`cerbos/policies/` 下的文件被两方读取：
+
+| 消费者 | 读取方式 | 用途 |
+|--------|---------|------|
+| Cerbos PDP | disk driver 从 `/policies` 递归加载，`watchForChanges` 热重载 | 规则求值 |
+| 权限服务 `services/cerbos_policy_parser.py` | 按项目子目录扫描 `derived_roles/*.yaml` 与 `resource_policies/*.yaml`，合并 `rules[].roles` 与 `rules[].derivedRoles` 两个字段的 `actions` | 产出 `{角色: [动作]}` 映射，供 `acl_resolver` 把 `role_bindings` 展开为 `granted_actions` |
+
+权限服务需要这份映射的原因：属性注入式策略（§4.3）要求服务端在调用 PDP 前先算出主体拥有哪些动作并注入 `principal.attr.granted_actions`，而“角色对应哪些动作”这层信息写在策略里。早期实现是在服务端维护一份 `ROLE_ACTIONS_MAP` 硬编码字典，与策略文件手工同步；当前实现删除了该副本，改为运行时解析策略文件，以策略为唯一权威源。代价是权限服务必须能读到策略目录，与 PDP 共享同一份文件（路径由 `CERBOS_POLICIES_DIR` 指定）。
+
+解析结果缓存在进程内的 `_role_actions_cache`，由策略写入、策略删除、角色定义创建与删除四类操作显式调用 `invalidate_role_actions_cache()` 失效。该缓存没有 TTL。
+
+角色定义在两处存储：
+
+| 存储 | 内容 | 写入时机 |
+|------|------|---------|
+| `role_definitions` 表 | 名称、描述、父角色、`permissions`、`project_id`、`is_system` | `POST /api/v1/roles/definitions` 先写表并提交 |
+| Cerbos YAML | 派生角色定义与资源规则 | 同一请求在事务提交后写文件，失败仅记 `cerbos_yaml_write_failed` 告警 |
+
+删除路径同构：先删表并提交，再清理 YAML，清理失败仅记 `cerbos_yaml_cleanup_failed`。角色定义没有更新端点。
+
+读取时三个消费者的取值来源不一致：
+
+| 消费者 | 取值 |
+|--------|------|
+| 管理台角色列表与详情 | `role_definitions.permissions` 非空则用它，为空回退 YAML 解析结果 |
+| `GET /api/v1/roles/permissions` 权限矩阵 | 只用 YAML 解析结果 |
+| 判定链路 `get_role_actions_map()` | 只用 YAML 解析结果中 `source == "cerbos"` 的角色 |
+
+由此产生的一致性缺口在 §16.1 列出。
+
+### 2.4 项目作为隔离单元
 
 | 维度 | 载体 | 作用 |
 |------|------|------|
@@ -76,7 +108,7 @@
 
 `role_definitions.project_id` 为 `NULL` 表示平台级角色，全部项目共享；非空表示仅该项目可见。
 
-### 2.4 部署拓扑与端口
+### 2.5 部署拓扑与端口
 
 | 服务 | 容器内端口 | 宿主机端口 | 编排文件 |
 |------|-----------|-----------|----------|
@@ -159,7 +191,7 @@ Cerbos PDP 不在主 compose 中启动，需以 `cerbos/policies` 作为 `/polic
 | 角色绑定 | `role_bindings` | 主体持有角色，可无范围（全部资源）、精确到资源类型加 ID，或限定到某容器资源 |
 | 限制 | `restrictions` | 型一 `subject_ban`：主体级封禁，判定直接 deny 且投影返回 suspended；型二 `resource_restriction`：主体对指定资源的禁止 |
 
-角色绑定在判定时展开为动作集合，展开映射由 `services/cerbos_policy_parser.py` 从 Cerbos YAML 解析（合并 `rules[].roles` 与 `rules[].derivedRoles` 两个字段的动作）并缓存。策略文件是角色到动作映射的唯一权威源，策略写入或角色定义变更时调用 `invalidate_role_actions_cache()` 失效缓存。
+角色绑定在判定时展开为动作集合，展开映射来自策略文件的解析结果，机制与缓存行为见 §2.3。
 
 ### 4.5 租户与项目
 
@@ -300,7 +332,7 @@ Cerbos PDP 不在主 compose 中启动，需以 `cerbos/policies` 作为 `/polic
 
 写操作统一经 `get_current_admin` 校验 Bearer token，经 `get_project_scope` 校验项目范围，经 `require_platform_permission` 校验平台功能权限。`granted_by` 一律取自 token 中的管理员身份，忽略请求体中的同名字段。
 
-创建自定义角色时，除写入 `role_definitions` 表外，同时生成 Cerbos YAML 使角色在判定中生效。YAML 写入失败不回滚角色创建，记录 `cerbos_yaml_write_failed` 告警。
+创建自定义角色时，除写入 `role_definitions` 表外，同时生成 Cerbos YAML：派生角色追加到 `cerbos/policies/derived_roles/custom_roles.yaml`，资源规则按动作前缀分别写入 `cerbos/policies/resource_policies/custom_kb_{name}.yaml` 与 `custom_doc_{name}.yaml`。这两个路径是策略根目录的直接子目录，不在任何项目命名空间内，双写与解析可见性的后果见 §2.3 与 §16.1。
 
 ### 5.6 事件与全局版本号
 
@@ -672,7 +704,7 @@ cerbos/policies/
 ├── rag-v14/                 首个接入项目：知识库与文档模型，属性注入式
 ├── demo2/                   OA 场景项目：请假、报销、绩效等，静态角色式
 ├── demo3/                   通用文档项目，静态角色式
-└── derived_roles/           管理台创建自定义角色时生成的扁平目录
+└── derived_roles/           管理台创建自定义角色时的写入目录，不属于任何项目命名空间
 docs/                        设计文档与诊断记录
 scripts/                     运维脚本
 docker-compose.yml           权限服务、管理台、PostgreSQL、Redis
@@ -681,7 +713,22 @@ docker-compose.keycloak.yml  Keycloak
 
 ## 16. 已知约束
 
-### 16.1 平台级约束
+### 16.1 角色定义的数据一致性
+
+角色定义同时存在于 `role_definitions` 表与 Cerbos YAML，两者无事务保护、无对账机制，读路径的取值来源也不统一（§2.3）。已知缺口：
+
+| 缺口 | 成因 | 表现 |
+|------|------|------|
+| 自定义角色对权限服务不可见 | 写入路径是 `policies/derived_roles/` 与 `policies/resource_policies/`，而 `parse_permissions_matrix()` 的扫描模式是对每个项目子目录做 `rglob("derived_roles/*.yaml")`，匹配不到策略根目录下的同名目录 | Cerbos 递归加载该文件因而规则生效，权限服务解析不到该角色。静态角色式规则正常判定；属性注入式项目中该角色的绑定展开为空，判定按无权限处理。管理台仍显示 `role_definitions.permissions` 中的权限 |
+| YAML 写入失败后状态分叉 | 表写入已提交，文件写入失败只记告警 | 管理台显示角色存在且有权限，判定链路查不到该角色 |
+| YAML 清理失败后策略残留 | 表记录已删除，文件清理失败只记告警 | Cerbos 继续加载残留的派生角色与资源规则 |
+| 权限无法修改 | 角色定义没有更新端点 | 改权限须删除重建或直接编辑策略文件；有活跃绑定的角色不允许删除，此时只能改文件 |
+| 解析缓存不自愈 | `_role_actions_cache` 无 TTL，仅由本进程的策略与角色写操作失效 | 多 worker 或多副本部署时，其他进程保留旧映射；直接编辑盘上策略文件后 PDP 已按新规则求值，权限服务仍按旧映射展开角色绑定。函数 docstring 提到的 TTL 在实现中不存在 |
+| 展示与判定取值不同源 | 管理台优先读表，判定只读 YAML 解析结果 | 表与文件不一致时，管理台显示的权限不代表实际判定结果 |
+
+规避方式：自定义角色创建后核对 `GET /api/v1/roles/permissions` 是否返回该角色，返回为空说明判定链路不认；策略文件的带外修改后重启权限服务或通过管理台策略接口触发一次写入以失效缓存。
+
+### 16.2 平台级约束
 
 | 约束 | 影响 |
 |------|------|
@@ -689,12 +736,13 @@ docker-compose.keycloak.yml  Keycloak
 | `resource_registry` 的唯一约束是 `(resource_type, resource_id)`，不含 `project_id` | 不同项目使用同名资源类型且资源 ID 相同时会互相覆盖 |
 | `resolve_granted_actions_by_principal` 查询 ACL 时不按 `project_id` 过滤 | 判定期的项目隔离依赖资源类型与 ID 的全局唯一性，而非查询条件 |
 | `role_definitions.name` 全表唯一 | 项目级角色不能与其他项目重名 |
-| 管理台创建自定义角色写入扁平 `policies/derived_roles/custom_roles.yaml` | 与按项目分目录的布局不一致，生成的角色对全部项目可见 |
+| 管理台创建的自定义角色不落入项目命名空间 | 与按项目分目录的布局不一致，Cerbos 侧对全部项目可见 |
 | `principal.roles` 只来自 JWT | 静态角色式项目的角色授予必须在 Keycloak 完成，平台的角色绑定对其无效 |
 | 全部项目共用一个 Keycloak realm 与一份 JWT 公钥 | 无法按项目隔离身份源 |
+| `parse_permissions_matrix()` 与 `get_resource_actions()` 每次调用都遍历磁盘解析 | 管理台角色列表、权限矩阵、系统配置三个接口的耗时随策略文件数量增长，这两个函数本身无缓存 |
 | 指标不带项目维度 | 跨项目容量分析需依赖日志或 trace |
 
-### 16.2 RAG 耦合残留
+### 16.3 RAG 耦合残留
 
 | 位置 | 现状 |
 |------|------|
@@ -707,7 +755,7 @@ docker-compose.keycloak.yml  Keycloak
 | 首次启动的内置项目建档 | 固定创建 `rag-v14` 项目及其 client_id 与 audience |
 | `tests/test_joint_contract.py` | 全部用例基于知识库与文档模型 |
 
-### 16.3 环境相关
+### 16.4 环境相关
 
 | 约束 | 影响 |
 |------|------|
