@@ -33,10 +33,22 @@ def admin_headers() -> dict:
     return make_admin_headers()
 
 
+def _hex_with_letter(length: int = 12) -> str:
+    """返回含至少一个字母的 hex 片段。
+
+    幂等键校验会拒绝"全数字的独立十进制段"（时间戳误判），
+    测试资源 ID 若恰好是全数字 hex 会误触发 422，故强制含字母。
+    """
+    _id = uuid.uuid4().hex[:length]
+    while _id.isdigit():
+        _id = uuid.uuid4().hex[:length]
+    return _id
+
+
 @pytest.fixture
 def unique_id() -> str:
-    """唯一 ID，用于测试隔离。"""
-    return uuid.uuid4().hex[:12]
+    """唯一 ID，用于测试隔离（保证含字母，避免幂等键时间戳误判）。"""
+    return _hex_with_letter(12)
 
 
 @pytest.fixture

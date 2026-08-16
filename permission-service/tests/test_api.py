@@ -5,8 +5,38 @@
 """
 
 import os
+import uuid
+
 import pytest
 from tests.utils import make_token, make_admin_headers, BASE_URL
+
+PROJECT_ID = "rag-v14"
+TENANT = "tenant-test"
+
+
+def _ik(facade: str, tenant: str, *rids: str, version: int = 1) -> str:
+    """构造符合 {facade}-{tenant}-{resource_id}[-{kb_id}]-v{n} 的确定性幂等键。"""
+    return f"{facade}-{tenant}-" + "-".join(rids) + f"-v{version}"
+
+
+def _svc_headers(client_id: str = "interactive-backend") -> dict:
+    """服务间请求头：X-Request-Id + X-Client-Id + X-Api-Key。"""
+    from tests.utils import SERVICE_API_KEY
+    return {
+        "X-Request-Id": f"test-{uuid.uuid4().hex[:8]}",
+        "X-Client-Id": client_id,
+        "X-Api-Key": SERVICE_API_KEY,
+    }
+
+
+def _prefilter_headers():
+    """检索链路服务间请求头（X-Client-Id=retrieval）。"""
+    return _svc_headers("retrieval")
+
+
+def _visibility_headers():
+    """盖戳链路服务间请求头（X-Client-Id=ingest）。"""
+    return _svc_headers("ingest")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -57,16 +87,17 @@ def test_check_deny_no_acl(api, test_token, headers, unique_id):
 # Test 5: 资源注册 + 幂等键
 # ═══════════════════════════════════════════════════════════
 
-def test_register_resource(api, unique_id):
+def test_register_resource(api, headers, unique_id):
     kb_id = f"kb-reg-{unique_id}"
+    key = _ik("rag-test", TENANT, kb_id)
 
     # 首次注册
     resp = api.post("/v1/resources/register", json={
         "resource_type": "kb", "resource_id": kb_id,
-        "owner": "user:admin", "tenant_id": "tenant-test",
-        "idempotency_key": f"test-reg-{unique_id}",
-    })
-    assert resp.status_code == 200
+        "owner": "user:admin", "tenant_id": TENANT,
+        "idempotency_key": key, "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["result"] == "created"
     assert data["change_id"]
@@ -74,10 +105,10 @@ def test_register_resource(api, unique_id):
     # 重复注册（同 key+payload）→ noop
     resp2 = api.post("/v1/resources/register", json={
         "resource_type": "kb", "resource_id": kb_id,
-        "owner": "user:admin", "tenant_id": "tenant-test",
-        "idempotency_key": f"test-reg-{unique_id}",
-    })
-    assert resp2.status_code == 200
+        "owner": "user:admin", "tenant_id": TENANT,
+        "idempotency_key": key, "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert resp2.status_code == 200, resp2.text
     assert resp2.json()["result"] == "noop"
 
 
@@ -85,23 +116,25 @@ def test_register_resource(api, unique_id):
 # Test 6: 幂等冲突 → 409
 # ═══════════════════════════════════════════════════════════
 
-def test_idempotency_conflict(api, unique_id):
+def test_idempotency_conflict(api, headers, unique_id):
     kb_id = f"kb-conflict-{unique_id}"
+    key = _ik("rag-test", TENANT, kb_id)
 
     # 首次注册
-    api.post("/v1/resources/register", json={
+    r1 = api.post("/v1/resources/register", json={
         "resource_type": "kb", "resource_id": kb_id,
-        "owner": "user:alice", "tenant_id": "tenant-test",
-        "idempotency_key": f"conflict-{unique_id}",
-    })
+        "owner": "user:alice", "tenant_id": TENANT,
+        "idempotency_key": key, "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert r1.status_code == 200, r1.text
 
     # 同 key 不同 payload
     resp = api.post("/v1/resources/register", json={
         "resource_type": "kb", "resource_id": kb_id,
         "owner": "user:bob",  # 不同 owner
-        "tenant_id": "tenant-test",
-        "idempotency_key": f"conflict-{unique_id}",
-    })
+        "tenant_id": TENANT,
+        "idempotency_key": key, "project_id": PROJECT_ID,
+    }, headers=headers)
     assert resp.status_code == 409
 
 
@@ -113,22 +146,24 @@ def test_check_allow_after_grant(api, test_token, headers, admin_headers, unique
     kb_id = f"kb-allow-{unique_id}"
 
     # 注册资源
-    api.post("/v1/resources/register", json={
+    reg = api.post("/v1/resources/register", json={
         "resource_type": "kb", "resource_id": kb_id,
-        "owner": "user:test-user", "tenant_id": "tenant-test",
-        "idempotency_key": f"allow-reg-{unique_id}",
-    })
+        "owner": "user:test-user", "tenant_id": TENANT,
+        "idempotency_key": _ik("rag-test", TENANT, kb_id), "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert reg.status_code == 200, reg.text
 
     # 授予权限（需要管理员认证）
-    api.post("/api/v1/acl/grant", json={
-        "tenant_id": "tenant-test",
+    grant = api.post("/api/v1/acl/grant", json={
+        "tenant_id": TENANT,
         "principal": "user:test-user",
         "resource_type": "kb",
         "resource_id": kb_id,
         "action": "kb:read",
         "granted_by": "admin",
-        "project_id": "rag-v14",
+        "project_id": PROJECT_ID,
     }, headers=admin_headers)
+    assert grant.status_code == 200, grant.text
 
     # check 应返回 allow
     resp = api.post("/v1/check", json={
@@ -154,21 +189,23 @@ def test_check_subject_ban(api, test_token, headers, admin_headers, unique_id):
     ban_token = make_token(sub=f"ban-user-{unique_id}", groups=[])
 
     # 注册资源 + 授予权限
-    api.post("/v1/resources/register", json={
+    reg = api.post("/v1/resources/register", json={
         "resource_type": "kb", "resource_id": kb_id,
-        "owner": ban_principal, "tenant_id": "tenant-test",
-        "idempotency_key": f"ban-reg-{unique_id}",
-    })
+        "owner": ban_principal, "tenant_id": TENANT,
+        "idempotency_key": _ik("rag-test", TENANT, kb_id), "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert reg.status_code == 200, reg.text
 
     # 型一封禁（需要管理员认证）
-    api.post("/api/v1/restrictions/add", json={
-        "tenant_id": "tenant-test",
+    ban = api.post("/api/v1/restrictions/add", json={
+        "tenant_id": TENANT,
         "restriction_type": "subject_ban",
         "principal": ban_principal,
         "reason": "Test ban",
         "created_by": "admin",
-        "project_id": "rag-v14",
+        "project_id": PROJECT_ID,
     }, headers=admin_headers)
+    assert ban.status_code == 200, ban.text
 
     # check 应返回 deny
     resp = api.post("/v1/check", json={
@@ -191,17 +228,18 @@ def test_prefilter_suspended(api, admin_headers, unique_id):
     ban_token = make_token(sub=f"prefilter-ban-{unique_id}", groups=[])
 
     # 型一封禁（需要管理员认证）
-    api.post("/api/v1/restrictions/add", json={
-        "tenant_id": "tenant-test",
+    ban = api.post("/api/v1/restrictions/add", json={
+        "tenant_id": TENANT,
         "restriction_type": "subject_ban",
         "principal": ban_principal,
         "reason": "Test",
         "created_by": "admin",
-        "project_id": "rag-v14",
+        "project_id": PROJECT_ID,
     }, headers=admin_headers)
+    assert ban.status_code == 200, ban.text
 
-    resp = api.get(f"/v1/prefilter?credential={ban_token}")
-    assert resp.status_code == 200
+    resp = api.get(f"/v1/prefilter?credential={ban_token}", headers=_prefilter_headers())
+    assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data.get("suspended") is True
 
@@ -212,8 +250,8 @@ def test_prefilter_suspended(api, admin_headers, unique_id):
 
 def test_prefilter_empty(api, unique_id):
     new_token = make_token(sub=f"new-user-{unique_id}", groups=[])
-    resp = api.get(f"/v1/prefilter?credential={new_token}")
-    assert resp.status_code == 200
+    resp = api.get(f"/v1/prefilter?credential={new_token}", headers=_prefilter_headers())
+    assert resp.status_code == 200, resp.text
     data = resp.json()
     assert "kbs" in data
     assert "suspended" not in data or not data.get("suspended")
@@ -223,35 +261,38 @@ def test_prefilter_empty(api, unique_id):
 # Test 11: visibility — 已挂载资源
 # ═══════════════════════════════════════════════════════════
 
-def test_visibility_normal(api, unique_id):
+def test_visibility_normal(api, headers, unique_id):
     doc_id = f"doc-vis-{unique_id}"
     kb_id = f"kb-vis-{unique_id}"
 
     # 注册
-    api.post("/v1/resources/register", json={
+    r1 = api.post("/v1/resources/register", json={
         "resource_type": "document", "resource_id": doc_id,
-        "owner": "user:admin", "tenant_id": "tenant-test",
-        "idempotency_key": f"vis-doc-{unique_id}",
-    })
-    api.post("/v1/resources/register", json={
+        "owner": "user:admin", "tenant_id": TENANT,
+        "idempotency_key": _ik("rag-test", TENANT, doc_id), "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert r1.status_code == 200, r1.text
+    r2 = api.post("/v1/resources/register", json={
         "resource_type": "kb", "resource_id": kb_id,
-        "owner": "user:admin", "tenant_id": "tenant-test",
-        "idempotency_key": f"vis-kb-{unique_id}",
-    })
+        "owner": "user:admin", "tenant_id": TENANT,
+        "idempotency_key": _ik("rag-test", TENANT, kb_id), "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert r2.status_code == 200, r2.text
 
     # 挂载
-    api.post("/v1/resources/link", json={
+    r3 = api.post("/v1/resources/link", json={
         "resource_type": "document", "resource_id": doc_id,
-        "kb_id": kb_id, "owner": "system", "tenant_id": "tenant-test",
-        "idempotency_key": f"vis-link-{unique_id}",
-    })
+        "kb_id": kb_id, "owner": "system", "tenant_id": TENANT,
+        "idempotency_key": _ik("rag-test", TENANT, doc_id, kb_id), "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert r3.status_code == 200, r3.text
 
     resp = api.post("/v1/visibility", json={
-        "tenant": "tenant-test",
+        "tenant": TENANT,
         "doc_id": doc_id,
         "channel": {"kb": kb_id},
-    })
-    assert resp.status_code == 200
+    }, headers=_visibility_headers())
+    assert resp.status_code == 200, resp.text
     data = resp.json()
     assert "allow_stamps" in data
     assert "version" in data
@@ -262,39 +303,43 @@ def test_visibility_normal(api, unique_id):
 # Test 12: visibility — 已解除挂载 → unmounted=true
 # ═══════════════════════════════════════════════════════════
 
-def test_visibility_unmounted(api, unique_id):
+def test_visibility_unmounted(api, headers, unique_id):
     doc_id = f"doc-unm-{unique_id}"
     kb_id = f"kb-unm-{unique_id}"
 
-    api.post("/v1/resources/register", json={
+    r1 = api.post("/v1/resources/register", json={
         "resource_type": "document", "resource_id": doc_id,
-        "owner": "user:admin", "tenant_id": "tenant-test",
-        "idempotency_key": f"unm-doc-{unique_id}",
-    })
-    api.post("/v1/resources/register", json={
+        "owner": "user:admin", "tenant_id": TENANT,
+        "idempotency_key": _ik("rag-test", TENANT, doc_id), "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert r1.status_code == 200, r1.text
+    r2 = api.post("/v1/resources/register", json={
         "resource_type": "kb", "resource_id": kb_id,
-        "owner": "user:admin", "tenant_id": "tenant-test",
-        "idempotency_key": f"unm-kb-{unique_id}",
-    })
-    api.post("/v1/resources/link", json={
+        "owner": "user:admin", "tenant_id": TENANT,
+        "idempotency_key": _ik("rag-test", TENANT, kb_id), "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert r2.status_code == 200, r2.text
+    r3 = api.post("/v1/resources/link", json={
         "resource_type": "document", "resource_id": doc_id,
-        "kb_id": kb_id, "owner": "system", "tenant_id": "tenant-test",
-        "idempotency_key": f"unm-link-{unique_id}",
-    })
+        "kb_id": kb_id, "owner": "system", "tenant_id": TENANT,
+        "idempotency_key": _ik("rag-test", TENANT, doc_id, kb_id), "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert r3.status_code == 200, r3.text
 
     # 解除挂载
-    api.post("/v1/resources/unlink", json={
+    r4 = api.post("/v1/resources/unlink", json={
         "resource_type": "document", "resource_id": doc_id,
-        "kb_id": kb_id, "owner": "system", "tenant_id": "tenant-test",
-        "idempotency_key": f"unm-unlink-{unique_id}",
-    })
+        "kb_id": kb_id, "owner": "system", "tenant_id": TENANT,
+        "idempotency_key": _ik("rag-test", TENANT, doc_id, kb_id), "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert r4.status_code == 200, r4.text
 
     resp = api.post("/v1/visibility", json={
-        "tenant": "tenant-test",
+        "tenant": TENANT,
         "doc_id": doc_id,
         "channel": {"kb": kb_id},
-    })
-    assert resp.status_code == 200
+    }, headers=_visibility_headers())
+    assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data.get("unmounted") is True
 
@@ -322,14 +367,14 @@ def test_filter_batch(api, test_token, headers, unique_id):
 # Test 14: context — ctx_token 铸造 + 验证
 # ═══════════════════════════════════════════════════════════
 
-def test_context_token(api, test_token, unique_id):
+def test_context_token(api, test_token, headers, unique_id):
     resp = api.post("/v1/context", json={
         "request_id": f"t-{unique_id}",
         "credential": test_token,
         "audience": "retrieval-worker",
         "ttl_s": 300,
-    })
-    assert resp.status_code == 200
+    }, headers=headers)
+    assert resp.status_code == 200, resp.text
     data = resp.json()
     assert "ctx_token" in data
     assert data["ctx_token"].startswith("ctx.")
@@ -374,9 +419,9 @@ def test_acl_grant_version_bump(api, admin_headers, unique_id):
 # Test 16: ACL 查询列表
 # ═══════════════════════════════════════════════════════════
 
-def test_list_acl(api):
-    resp = api.get("/api/v1/acl")
-    assert resp.status_code == 200
+def test_list_acl(api, admin_headers):
+    resp = api.get("/api/v1/acl", headers=admin_headers)
+    assert resp.status_code == 200, resp.text
     assert isinstance(resp.json(), list)
 
 
@@ -424,24 +469,24 @@ def test_restriction_add_remove(api, admin_headers, unique_id):
     assert "restriction_id" in resp.json()
 
     # 查询
-    list_resp = api.get(f"/api/v1/restrictions?principal={principal}")
-    assert list_resp.status_code == 200
+    list_resp = api.get(f"/api/v1/restrictions?principal={principal}", headers=admin_headers)
+    assert list_resp.status_code == 200, list_resp.text
     items = list_resp.json()
     assert len(items) > 0
 
     # 解除（需要管理员认证）
     rid = items[0]["id"]
     remove_resp = api.post(f"/api/v1/restrictions/remove?restriction_id={rid}", headers=admin_headers)
-    assert remove_resp.status_code == 200
+    assert remove_resp.status_code == 200, remove_resp.text
 
 
 # ═══════════════════════════════════════════════════════════
 # Test 19: 审计日志查询
 # ═══════════════════════════════════════════════════════════
 
-def test_audit_query(api):
-    resp = api.get("/api/v1/audit?limit=10")
-    assert resp.status_code == 200
+def test_audit_query(api, admin_headers):
+    resp = api.get("/api/v1/audit?limit=10", headers=admin_headers)
+    assert resp.status_code == 200, resp.text
     assert isinstance(resp.json(), list)
 
 
@@ -449,13 +494,13 @@ def test_audit_query(api):
 # Test 20: 策略模拟器
 # ═══════════════════════════════════════════════════════════
 
-def test_simulate(api):
+def test_simulate(api, admin_headers):
     resp = api.post("/api/v1/simulate", json={
         "principal": {"id": "user:alice", "roles": ["user"], "attr": {}},
         "action": "kb:read",
         "resource": {"kind": "kb", "id": "test-kb", "attr": {"retired": False}},
-    })
-    assert resp.status_code == 200
+    }, headers=admin_headers)
+    assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["decision"] in ("allow", "deny", "indeterminate")
 
@@ -470,21 +515,24 @@ def test_filter_type2_restriction(api, test_token, headers, admin_headers, uniqu
     kb_id = f"kb-t2r-{unique_id}"
 
     # 注册 + 挂载
-    api.post("/v1/resources/register", json={
+    r1 = api.post("/v1/resources/register", json={
         "resource_type": "kb", "resource_id": kb_id,
-        "owner": "user:admin", "tenant_id": "tenant-test",
-        "idempotency_key": f"t2r-kb-{unique_id}",
-    })
-    api.post("/v1/resources/register", json={
+        "owner": "user:admin", "tenant_id": TENANT,
+        "idempotency_key": _ik("rag-test", TENANT, kb_id), "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert r1.status_code == 200, r1.text
+    r2 = api.post("/v1/resources/register", json={
         "resource_type": "document", "resource_id": doc_id,
-        "owner": "user:admin", "tenant_id": "tenant-test",
-        "idempotency_key": f"t2r-doc-{unique_id}",
-    })
-    api.post("/v1/resources/link", json={
+        "owner": "user:admin", "tenant_id": TENANT,
+        "idempotency_key": _ik("rag-test", TENANT, doc_id), "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert r2.status_code == 200, r2.text
+    r3 = api.post("/v1/resources/link", json={
         "resource_type": "document", "resource_id": doc_id,
-        "kb_id": kb_id, "owner": "system", "tenant_id": "tenant-test",
-        "idempotency_key": f"t2r-link-{unique_id}",
-    })
+        "kb_id": kb_id, "owner": "system", "tenant_id": TENANT,
+        "idempotency_key": _ik("rag-test", TENANT, doc_id, kb_id), "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert r3.status_code == 200, r3.text
 
     # 授予 test-user kb:read
     api.post("/api/v1/acl/grant", json={
@@ -569,7 +617,7 @@ def test_acl_grant_kb_channel_kb(api, admin_headers, unique_id):
 # Test 23: prefilter 按 tenant_id 隔离（A9 修复验证）
 # ═══════════════════════════════════════════════════════════
 
-def test_prefilter_tenant_isolation(api, admin_headers, unique_id):
+def test_prefilter_tenant_isolation(api, headers, admin_headers, unique_id):
     """验证不同租户的 ACL 不互相影响 prefilter。"""
     kb_a = f"kb-tenant-a-{unique_id}"
     kb_b = f"kb-tenant-b-{unique_id}"
@@ -577,41 +625,45 @@ def test_prefilter_tenant_isolation(api, admin_headers, unique_id):
     user_b_token = make_token(sub=f"user-b-{unique_id}", tenant="tenant-b")
 
     # 在 tenant-a 注册 KB 并授予 user-a
-    api.post("/v1/resources/register", json={
+    r1 = api.post("/v1/resources/register", json={
         "resource_type": "kb", "resource_id": kb_a,
         "owner": "user:admin", "tenant_id": "tenant-a",
-        "idempotency_key": f"ti-kba-{unique_id}",
-    })
-    api.post("/api/v1/acl/grant", json={
+        "idempotency_key": _ik("rag-test", "tenant-a", kb_a), "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert r1.status_code == 200, r1.text
+    g1 = api.post("/api/v1/acl/grant", json={
         "tenant_id": "tenant-a", "principal": f"user:user-a-{unique_id}",
         "resource_type": "kb", "resource_id": kb_a,
         "action": "kb:read", "granted_by": "admin",
-        "project_id": "rag-v14",
+        "project_id": PROJECT_ID,
     }, headers=make_admin_headers(tenant="tenant-a"))
+    assert g1.status_code == 200, g1.text
 
     # 在 tenant-b 注册 KB 并授予 user-b
-    api.post("/v1/resources/register", json={
+    r2 = api.post("/v1/resources/register", json={
         "resource_type": "kb", "resource_id": kb_b,
         "owner": "user:admin", "tenant_id": "tenant-b",
-        "idempotency_key": f"ti-kbb-{unique_id}",
-    })
-    api.post("/api/v1/acl/grant", json={
+        "idempotency_key": _ik("rag-test", "tenant-b", kb_b), "project_id": PROJECT_ID,
+    }, headers=headers)
+    assert r2.status_code == 200, r2.text
+    g2 = api.post("/api/v1/acl/grant", json={
         "tenant_id": "tenant-b", "principal": f"user:user-b-{unique_id}",
         "resource_type": "kb", "resource_id": kb_b,
         "action": "kb:read", "granted_by": "admin",
-        "project_id": "rag-v14",
+        "project_id": PROJECT_ID,
     }, headers=make_admin_headers(tenant="tenant-b"))
+    assert g2.status_code == 200, g2.text
 
     # user-a 的 prefilter 不应包含 tenant-b 的 KB
-    resp_a = api.get(f"/v1/prefilter?credential={user_a_token}")
-    assert resp_a.status_code == 200
+    resp_a = api.get(f"/v1/prefilter?credential={user_a_token}", headers=_prefilter_headers())
+    assert resp_a.status_code == 200, resp_a.text
     kbs_a = resp_a.json().get("kbs", [])
     assert kb_b not in kbs_a, \
         f"User from tenant-a should NOT see tenant-b's KB. kbs={kbs_a}"
 
     # user-b 的 prefilter 不应包含 tenant-a 的 KB
-    resp_b = api.get(f"/v1/prefilter?credential={user_b_token}")
-    assert resp_b.status_code == 200
+    resp_b = api.get(f"/v1/prefilter?credential={user_b_token}", headers=_prefilter_headers())
+    assert resp_b.status_code == 200, resp_b.text
     kbs_b = resp_b.json().get("kbs", [])
     assert kb_a not in kbs_b, \
         f"User from tenant-b should NOT see tenant-a's KB. kbs={kbs_b}"
@@ -635,7 +687,8 @@ def test_acl_grant_atomic_change_log(api, admin_headers, unique_id):
     version = resp.json()["version"]
 
     # 查询审计日志 — 应有对应的变更记录
-    audit_resp = api.get(f"/api/v1/audit?resource_type=kb&resource_id={kb_id}&limit=5")
+    audit_resp = api.get(f"/api/v1/audit?resource_type=kb&resource_id={kb_id}&limit=5",
+                         headers=admin_headers)
     assert audit_resp.status_code == 200
     entries = audit_resp.json()
 
