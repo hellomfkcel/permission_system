@@ -7,9 +7,12 @@ import pytest
 import httpx
 from jose import jwt
 
-from tests.utils import make_token, make_admin_headers, BASE_URL
+from tests.utils import (
+    make_token, make_admin_headers, BASE_URL, SERVICE_API_KEY, TEST_PROJECT_ID,
+)
 
-JWT_PRIVATE_KEY_PATH = "/home/mfkcel/proj_rag_dev/config/jwt_private.pem"
+# 私钥路径由 tests/utils.py 统一解析（默认仓库内 config/，可用环境变量覆盖）
+from tests.utils import JWT_PRIVATE_KEY_PATH  # noqa: F401
 
 
 @pytest.fixture
@@ -44,8 +47,13 @@ def api():
 
 @pytest.fixture
 def headers(test_token):
-    """标准请求头（决策面 API 使用 X-Request-Id + X-Client-Id）。"""
+    """/v1/* 服务间端点请求头。
+
+    自平台改为多项目接入后，/v1/* 需同时携带 X-Client-Id（project_clients 注册）
+    与 X-Api-Key（project_api_keys 签发），缺任一项分别返回 403 / 401。
+    """
     return {
         "X-Request-Id": f"test-{uuid.uuid4().hex[:8]}",
         "X-Client-Id": "interactive-backend",
+        "X-Api-Key": SERVICE_API_KEY,
     }

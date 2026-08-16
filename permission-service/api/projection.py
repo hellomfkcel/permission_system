@@ -33,6 +33,11 @@ from app.metrics_collector import record_authz_decision
 router = APIRouter(prefix="/v1", tags=["projection"])
 
 
+def _project_of(request: Request) -> str | None:
+    """取本次请求归属的项目 ID（由准入中间件注入）。"""
+    return getattr(request.state, "project_id", None)
+
+
 @router.get(
     "/prefilter",
     response_model=PreFilterResponse | PreFilterSuspendedResponse,
@@ -59,15 +64,16 @@ async def get_prefilter(
         raise HTTPException(status_code=401, detail="Invalid credential") from e
 
     # 2. 型一封禁检查
+    project_id = _project_of(request)
     is_suspended = await check_subject_ban(
-        db, principal.principals, principal.tenant_id,
+        db, principal.principals, principal.tenant_id, project_id,
     )
     if is_suspended:
         return PreFilterSuspendedResponse(suspended=True, reason="subject_banned")
 
     # 3-4. 查询有权限的活跃 KB
     kbs = await get_active_kbs_for_principal(
-        db, principal.principals, principal.tenant_id,
+        db, principal.principals, principal.tenant_id, project_id,
     )
 
     # 5. 型二封禁的资源
@@ -75,7 +81,7 @@ async def get_prefilter(
     # 检查所有活跃 KB 中型二封禁的
     for kb_id in kbs:
         banned = await check_resource_restriction(
-            db, "kb", kb_id, principal.tenant_id,
+            db, "kb", kb_id, principal.tenant_id, project_id,
         )
         if banned and any(b in principal.principals for b in banned):
             excluded_kbs.append(kb_id)
@@ -102,7 +108,7 @@ async def get_prefilter(
         r in ("role:system_admin", "role:admin") for r in principal.principals
     )
 
-    record_authz_decision("prefilter", "allow")
+    record_authz_decision("prefilter", "allow", project_id)
 
     return PreFilterResponse(
         kbs=kbs,
@@ -130,6 +136,8 @@ async def get_visibility(
     4. 查 restrictions → deny_stamps
     5. 取当前全局版本号
     """
+    project_id = _project_of(request)
+
     # 1. 查 mount_registry
     stmt = select(MountRegistry).where(
         MountRegistry.doc_id == body.doc_id,
@@ -143,33 +151,37 @@ async def get_visibility(
 
     # 2. 查 resource_registry for doc and kb
     # 检查 doc retired
-    stmt_doc = select(ResourceRegistry).where(
+    doc_conditions = [
         ResourceRegistry.resource_type == "document",
         ResourceRegistry.resource_id == body.doc_id,
-    )
-    result_doc = await db.execute(stmt_doc)
-    doc_reg = result_doc.scalar_one_or_none()
+    ]
+    if project_id is not None:
+        doc_conditions.append(ResourceRegistry.project_id == project_id)
+    result_doc = await db.execute(select(ResourceRegistry).where(*doc_conditions))
+    doc_reg = result_doc.scalars().first()
     if doc_reg and doc_reg.retired:
         return VisibilityResponse(unmounted=True)
 
     # 检查 kb retired
-    stmt_kb = select(ResourceRegistry).where(
+    kb_conditions = [
         ResourceRegistry.resource_type == "kb",
         ResourceRegistry.resource_id == body.channel.kb,
-    )
-    result_kb = await db.execute(stmt_kb)
-    kb_reg = result_kb.scalar_one_or_none()
+    ]
+    if project_id is not None:
+        kb_conditions.append(ResourceRegistry.project_id == project_id)
+    result_kb = await db.execute(select(ResourceRegistry).where(*kb_conditions))
+    kb_reg = result_kb.scalars().first()
     if kb_reg and kb_reg.retired:
         return VisibilityResponse(unmounted=True)
 
     # 3. ACL → allow_stamps
     allow_stamps = await get_allow_stamps_for_channel(
-        db, body.doc_id, body.channel.kb, body.tenant,
+        db, body.doc_id, body.channel.kb, body.tenant, project_id,
     )
 
     # 4. restrictions → deny_stamps
     deny_stamps = await get_deny_stamps_for_channel(
-        db, body.doc_id, body.channel.kb, body.tenant,
+        db, body.doc_id, body.channel.kb, body.tenant, project_id,
     )
 
     # 5. 全局版本号

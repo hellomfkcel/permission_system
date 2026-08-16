@@ -31,8 +31,9 @@ class RoleDefinition(Base):
         default=None, comment="所属项目 ID（NULL=平台级角色）",
     )
     name: Mapped[str] = mapped_column(
-        String(64), nullable=False, unique=True,
-        comment="角色名: kb_reader, kb_writer, kb_admin, admin 等"
+        String(64), nullable=False,
+        comment="角色名: kb_reader, kb_writer, kb_admin, admin 等。"
+                "项目级角色在项目内唯一，平台级角色（project_id IS NULL）全平台唯一。"
     )
     description: Mapped[str] = mapped_column(
         String(512), nullable=False, default="",
@@ -59,4 +60,17 @@ class RoleDefinition(Base):
 
     __table_args__ = (
         Index("idx_role_def_project", "project_id"),
+        # Postgres 中 NULL 互不相等，项目级与平台级唯一性需分别用部分索引表达
+        Index(
+            "uq_role_def_project_name",
+            "project_id", "name",
+            unique=True,
+            postgresql_where="project_id IS NOT NULL",
+        ),
+        Index(
+            "uq_role_def_platform_name",
+            "name",
+            unique=True,
+            postgresql_where="project_id IS NULL",
+        ),
     )

@@ -54,6 +54,9 @@ class SimulateRequest(BaseModel):
     principal: dict | None = Field(None, description="Principal JSON")
     action: str = Field(..., description="动词")
     resource: dict = Field(..., description="Resource JSON {kind, id, attr?}")
+    project_id: str | None = Field(
+        None, description="按项目过滤授权数据；不传则跨项目查询"
+    )
 
 
 class SimulateResult(BaseModel):
@@ -209,15 +212,19 @@ async def simulate(
     # ── 查询真实 ACL + 角色绑定 → granted_actions ──
     async with async_session() as db:
         granted_actions = await resolve_granted_actions_by_principal(
-            db, set(principals), body.action,
-            resource_kind, resource_id,
+            db, list(principals), body.action,
+            resource_kind, resource_id, project_id=body.project_id,
         )
 
         # 查询型一封禁
-        is_banned = await check_subject_ban(db, set(principals), tenant_id)
+        is_banned = await check_subject_ban(
+            db, list(principals), tenant_id, body.project_id,
+        )
 
         # 查询资源属性
-        res_attr = await get_resource_attr(db, resource_kind, resource_id)
+        res_attr = await get_resource_attr(
+            db, resource_kind, resource_id, body.project_id,
+        )
         # 合并用户提供的 attr（用户输入覆盖 DB 查询）
         merged_attr = {**res_attr, **resource_attr}
 

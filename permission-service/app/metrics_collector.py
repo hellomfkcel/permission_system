@@ -22,21 +22,37 @@ def inc_counter(name: str, value: int = 1) -> None:
 # ── 便捷方法 ──
 
 
-def record_authz_decision(endpoint: str, decision: str) -> None:
+def _project_label(project_id: str | None) -> str:
+    """项目标签值。未知来源统一记为 unknown，避免标签基数因空值分裂。"""
+    return project_id or "unknown"
+
+
+def record_authz_decision(
+    endpoint: str, decision: str, project_id: str | None = None,
+) -> None:
     """记录一次权限判定结果。
 
-    Prometheus metric: authz_decision_total{endpoint, decision}
+    Prometheus metric: authz_decision_total{endpoint, decision, project}
+    project 维度用于区分多项目共用一个服务实例时各项目的判定量与拒绝率。
     """
-    inc_counter(f"authz_decision_total;endpoint={endpoint};decision={decision}")
+    inc_counter(
+        f"authz_decision_total;endpoint={endpoint};decision={decision}"
+        f";project={_project_label(project_id)}"
+    )
 
 
-def record_authz_call_failed(endpoint: str, kind: str) -> None:
+def record_authz_call_failed(
+    endpoint: str, kind: str, project_id: str | None = None,
+) -> None:
     """记录一次权限服务调用失败。
 
-    Prometheus metric: authz_call_failed_total{endpoint, kind}
+    Prometheus metric: authz_call_failed_total{endpoint, kind, project}
     kind ∈ {timeout, connection, http_error}
     """
-    inc_counter(f"authz_call_failed_total;endpoint={endpoint};kind={kind}")
+    inc_counter(
+        f"authz_call_failed_total;endpoint={endpoint};kind={kind}"
+        f";project={_project_label(project_id)}"
+    )
 
 
 def record_authz_obligation_unknown() -> None:
@@ -101,8 +117,8 @@ def get_prometheus_metrics() -> str:
 
     # Counter metrics
     counter_helps = {
-        "authz_decision_total": "Authorization decisions by endpoint and outcome (allow/deny/indeterminate)",
-        "authz_call_failed_total": "Failed authorization calls by endpoint and failure kind",
+        "authz_decision_total": "Authorization decisions by endpoint, outcome (allow/deny/indeterminate) and project",
+        "authz_call_failed_total": "Failed authorization calls by endpoint, failure kind and project",
         "authz_obligation_unknown_total": "Unknown obligation keys encountered (should be 0)",
         "visibility_events_published_total": "VisibilityChanged events published to Redis",
         "visibility_events_publish_failed_total": "VisibilityChanged event publishing failures",
@@ -125,14 +141,21 @@ def get_prometheus_metrics() -> str:
             lines.append(f"# TYPE {metric_name} counter")
             for full_key, value in sorted(matching.items()):
                 labels_str = full_key[len(prefix):]
-                # Parse key=value pairs
+                # 内部键形如 name;k1=v1;k2=v2，输出需为 Prometheus 文本格式
+                # name{k1="v1",k2="v2"}：标签值必须加引号并转义，否则无法被采集端解析。
                 label_parts = []
                 for part in labels_str.split(";"):
-                    if "=" in part:
-                        label_parts.append(part)
-                label_str = ",".join(label_parts) if label_parts else ""
-                if label_str:
-                    lines.append(f"{metric_name}{{{label_str}}} {value}")
+                    if "=" not in part:
+                        continue
+                    label_name, _, label_value = part.partition("=")
+                    escaped = (
+                        label_value.replace("\\", "\\\\")
+                        .replace('"', '\\"')
+                        .replace("\n", "\\n")
+                    )
+                    label_parts.append(f'{label_name}="{escaped}"')
+                if label_parts:
+                    lines.append(f"{metric_name}{{{','.join(label_parts)}}} {value}")
                 else:
                     lines.append(f"{metric_name} {value}")
 

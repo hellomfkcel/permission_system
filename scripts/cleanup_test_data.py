@@ -17,8 +17,13 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 import json
 
-BASE_URL = "http://localhost:18080"
-PERM_DB_DSN = "postgresql://perm_user:perm_pass@localhost:25433/permission_db"
+import os as _os
+
+BASE_URL = _os.getenv("PERM_SERVICE_URL", "http://localhost:18080")
+PERM_DB_DSN = _os.getenv(
+    "DATABASE_URL_SYNC",
+    "postgresql://perm_user:perm_pass@localhost:25433/permission_db",
+)
 
 # 测试资源匹配模式（联合契约测试 J-1~J-20 + 诊断测试 + 集成测试 + 多租户 + 封禁 + 冲突 + 可见性测试）
 TEST_RESOURCE_PATTERNS = [
