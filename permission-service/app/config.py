@@ -61,7 +61,9 @@ class Settings(BaseSettings):
 
     # ── Keycloak ──
     keycloak_server_url: str = "http://localhost:8080"
-    keycloak_realm: str = "rag-v14"
+    # Realm 名与具体接入项目无关；历史默认值为 rag-v14，现改为中性名。
+    # 已有部署通过 KEYCLOAK_REALM 环境变量保留原值即可。
+    keycloak_realm: str = "permission-platform"
     keycloak_client_id: str = "permission-service"
     keycloak_client_secret: str = ""
     # Keycloak client secret 文件路径（Docker secrets / K8s Secret 挂载）。
@@ -132,6 +134,19 @@ class Settings(BaseSettings):
     tls_enabled: bool = False
     tls_cert_file: str = ""
     tls_key_file: str = ""
+
+    # ── 首次启动引导 ──
+    # 首次启动（projects 表为空）时自动建档的项目 ID 与显示名。
+    # 这是平台从单项目形态演进而来的兼容逻辑：把 SERVICE_API_KEY 与内置
+    # client_id / audience 落到一个具体项目上，使旧接入方无需改配置即可继续工作。
+    # 全新部署可设 BOOTSTRAP_PROJECT_ENABLED=false 跳过，改为在管理台手工建项目。
+    bootstrap_project_enabled: bool = True
+    bootstrap_project_id: str = "rag-v14"
+    bootstrap_project_name: str = "RAG v14 知识库系统"
+    # 内置 client_id 与 audience，逗号分隔
+    bootstrap_client_ids: str = "interactive-backend,retrieval,ingest"
+    bootstrap_audiences: str = "retrieval-worker,ingestion-worker,stamping-worker"
+    bootstrap_admin_user: str = "admin"
 
     # ── 生产模式标记 ──
     # production=true 时启用额外安全检查：

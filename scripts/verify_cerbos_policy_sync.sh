@@ -1,44 +1,49 @@
 #!/bin/bash
 # Cerbos 策略同步验证脚本
-# 验证 permission-system 和 RAG 系统之间的 Cerbos 策略一致性
-# 设计依据：docs/外部系统设计.md §9 文件索引 + docs/RAG系统设计v14.md §27.1
+# 比对两个策略目录的差异，用于确认权限平台与接入方（如各业务系统本地副本）
+# 使用同一份策略。
+#
+# 用法:
+#   scripts/verify_cerbos_policy_sync.sh <目录A> <目录B> [项目ID]
+#
+# 未指定项目 ID 时比对整个策略树；指定时只比对该项目命名空间。
+# 目录也可通过环境变量提供：CERBOS_POLICIES_DIR_A / CERBOS_POLICIES_DIR_B
 
-set -e
+set -euo pipefail
 
-PERM_DIR="/home/mfkcel/permission-system/cerbos/policies"
-RAG_DIR="/home/mfkcel/proj_rag_dev/cerbos/policies"
+DIR_A="${1:-${CERBOS_POLICIES_DIR_A:-}}"
+DIR_B="${2:-${CERBOS_POLICIES_DIR_B:-}}"
+PROJECT="${3:-}"
 
-echo "=== Cerbos Policy Sync Verification ==="
-echo "Permission System: $PERM_DIR"
-echo "RAG System: $RAG_DIR"
-echo ""
-
-HAS_DIFF=0
-
-# Compare derived roles
-if diff -q "$PERM_DIR/derived_roles/rag_roles.yaml" "$RAG_DIR/derived_roles/rag_roles.yaml" > /dev/null 2>&1; then
-    echo "✅ derived_roles/rag_roles.yaml — IDENTICAL"
-else
-    echo "❌ derived_roles/rag_roles.yaml — DIFFERS!"
-    diff "$PERM_DIR/derived_roles/rag_roles.yaml" "$RAG_DIR/derived_roles/rag_roles.yaml"
-    HAS_DIFF=1
+if [[ -z "$DIR_A" || -z "$DIR_B" ]]; then
+    echo "用法: $0 <目录A> <目录B> [项目ID]" >&2
+    echo "或设置 CERBOS_POLICIES_DIR_A / CERBOS_POLICIES_DIR_B 环境变量" >&2
+    exit 2
 fi
 
-# Compare resource policies
-for policy in kb.yaml document.yaml; do
-    if diff -q "$PERM_DIR/resource_policies/$policy" "$RAG_DIR/resource_policies/$policy" > /dev/null 2>&1; then
-        echo "✅ resource_policies/$policy — IDENTICAL"
-    else
-        echo "❌ resource_policies/$policy — DIFFERS!"
-        diff "$PERM_DIR/resource_policies/$policy" "$RAG_DIR/resource_policies/$policy"
-        HAS_DIFF=1
+if [[ -n "$PROJECT" ]]; then
+    DIR_A="$DIR_A/$PROJECT"
+    DIR_B="$DIR_B/$PROJECT"
+fi
+
+for d in "$DIR_A" "$DIR_B"; do
+    if [[ ! -d "$d" ]]; then
+        echo "目录不存在: $d" >&2
+        exit 2
     fi
 done
 
+echo "=== Cerbos Policy Sync Verification ==="
+echo "A: $DIR_A"
+echo "B: $DIR_B"
 echo ""
-if [ $HAS_DIFF -eq 0 ]; then
-    echo "✅ All Cerbos policies are synchronized between systems."
-else
-    echo "❌ Policy divergence detected. Sync required!"
-    exit 1
+
+# 只比对策略文件本身，忽略 .versions/ 归档目录
+if diff -r -q -x '.versions' "$DIR_A" "$DIR_B" > /dev/null 2>&1; then
+    echo "策略一致。"
+    exit 0
 fi
+
+echo "存在差异："
+diff -r -x '.versions' "$DIR_A" "$DIR_B" || true
+exit 1

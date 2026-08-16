@@ -46,147 +46,75 @@ RESOURCE_TYPE_LABELS: dict[str, str] = {
 # ══════════════════════════════════════════════════════════════
 
 
-def _build_action_prefix_map() -> dict[str, str]:
-    """从 Cerbos YAML + VALID_ACTIONS 动态推导 action 前缀 → 资源类型映射。
 
-    扫描 resource_policies/*.yaml，当 action 含 ":" 且其前缀对应 VALID_ACTIONS
-    中的已知 action 家族时（如 doc:view 对应 doc:download 等同族 action），
-    推导出 前缀 → resource_type 的映射。
+def _prefix_map(project_id: str | None = None) -> dict[str, str]:
+    """action 前缀 → 资源类型映射。
 
-    对于自定义类型中 "read:own" 这类作用域后缀（非资源类型前缀），
-    因 "read" 不是 VALID_ACTIONS 中的已知 action 家族前缀，会被自动过滤。
+    仅对 VALID_ACTIONS 中的已知 action 家族前缀建立映射（如 doc → document）。
+    自定义类型中 "read:own" 这类作用域后缀，因 "read" 不是已知家族前缀而被过滤。
+    数据来自共享的策略索引，不再单独遍历磁盘。
     """
-    import os
-    from pathlib import Path
+    from services.cerbos_policy_parser import get_policy_index
 
-    # 从 VALID_ACTIONS 提取已知的 action 前缀集合
     known_prefixes = {a.split(":")[0] for a in VALID_ACTIONS if ":" in a}
-
-    from app.config import get_cerbos_policies_dir
-    policies_dir = get_cerbos_policies_dir()
-    if not policies_dir.exists():
-        return {}
+    index = get_policy_index()
 
     mapping: dict[str, str] = {}
-    try:
-        import yaml
-        for yaml_file in policies_dir.rglob("resource_policies/*.yaml"):
-            if ".versions" in yaml_file.parts:
+    for resource_type in index.visible_resources(project_id):
+        for action in index.resource_actions[resource_type]:
+            if ":" not in action:
                 continue
-            try:
-                with open(yaml_file) as f:
-                    for doc in yaml.safe_load_all(f):
-                        if not isinstance(doc, dict):
-                            continue
-                        rp = doc.get("resourcePolicy", {})
-                        resource_type = rp.get("resource", "")
-                        if not resource_type:
-                            continue
-                        for rule in rp.get("rules", []):
-                            for action in rule.get("actions", []):
-                                if ":" in action:
-                                    prefix = action.split(":")[0]
-                                    # 仅映射 VALID_ACTIONS 中的已知 action 前缀
-                                    if prefix in known_prefixes:
-                                        mapping[prefix] = resource_type
-            except Exception:
-                pass
-    except ImportError:
-        pass
-
+            prefix = action.split(":")[0]
+            if prefix in known_prefixes:
+                mapping[prefix] = resource_type
     return mapping
-
-
-def _scan_cerbos_yaml_actions(project_id: str | None = None) -> dict[str, set[str]]:
-    """从 Cerbos 策略 YAML 文件中扫描出所有 resource_type → {actions} 映射。
-
-    Args:
-        project_id: 若指定，仅扫描该项目目录；若 None，扫描所有项目。
-
-    补充 VALID_ACTIONS 中未硬编码的项目自定义资源类型（如 OA 系统资源）。
-    """
-    import os
-    from pathlib import Path
-
-    from app.config import get_cerbos_policies_dir
-    policies_dir = get_cerbos_policies_dir()
-    if not policies_dir.exists():
-        return {}
-
-    # 确定扫描范围
-    if project_id:
-        search_roots = [policies_dir / project_id]
-    else:
-        search_roots = [d for d in policies_dir.iterdir() if d.is_dir() and d.name != ".versions"]
-
-    result: dict[str, set[str]] = {}
-    try:
-        import yaml
-        for root in search_roots:
-            if not root.exists():
-                continue
-            for yaml_file in root.rglob("resource_policies/*.yaml"):
-                if ".versions" in yaml_file.parts:
-                    continue
-                try:
-                    with open(yaml_file) as f:
-                        docs = list(yaml.safe_load_all(f))
-                        for doc in docs:
-                            if not isinstance(doc, dict):
-                                continue
-                            rp = doc.get("resourcePolicy") or doc.get("resource_policy")
-                            if not rp:
-                                continue
-                            resource_type = rp.get("resource", "")
-                            if not resource_type:
-                                continue
-                            if resource_type not in result:
-                                result[resource_type] = set()
-                            for rule in rp.get("rules", []):
-                                for action in rule.get("actions", []):
-                                    result[resource_type].add(action)
-                except Exception:
-                    pass
-    except ImportError:
-        pass
-
-    return result
 
 
 def get_resource_actions(project_id: str | None = None) -> dict[str, list[str]]:
     """按资源类型分组返回所有有效 action。
 
-    资源类型由 Cerbos YAML 策略文件定义（唯一权威源）。
-    - platform 始终包含（全局平台管理功能）。
-    - 其他资源类型全部从项目 YAML 中动态发现，不做任何硬编码类型名假设。
-    - 对 YAML 中发现的每个类型，补充 VALID_ACTIONS 中前缀匹配的 action（YAML 可能只定义子集）。
+    资源类型由 Cerbos YAML 策略文件定义（唯一权威源）：
+    - platform 始终包含（全局平台管理功能）；
+    - 其他资源类型全部从策略索引中动态发现，不做硬编码类型名假设；
+    - 对发现的每个类型，补充 VALID_ACTIONS 中前缀匹配的 action
+      （策略可能只声明了子集）。
 
     Args:
-        project_id: 若指定，仅返回该项目下的类型；若 None，返回全部项目的类型。
+        project_id: 指定时只返回该项目及无项目归属的类型；None 返回全部。
     """
-    result: dict[str, set[str]] = {}
+    from services.cerbos_policy_parser import get_resource_actions_map
 
-    # 1. platform 始终包含（全局类型）
-    result["platform"] = set(PLATFORM_ACTIONS)
+    result: dict[str, set[str]] = {"platform": set(PLATFORM_ACTIONS)}
 
-    # 2. 从 Cerbos YAML 扫描资源类型（唯一权威源，按项目范围）
-    cerbos_actions = _scan_cerbos_yaml_actions(project_id)
-    for rt, actions in cerbos_actions.items():
-        if rt not in result:
-            result[rt] = set()
-        result[rt].update(actions)
+    for resource_type, actions in get_resource_actions_map(project_id).items():
+        result.setdefault(resource_type, set()).update(actions)
 
-    # 3. 对每个从 YAML 发现的资源类型，动态查找 VALID_ACTIONS 中前缀匹配的 action
-    #    前缀→类型映射由 _build_action_prefix_map() 从 YAML 数据动态推导，不硬编码
-    prefix_map = _build_action_prefix_map()
-    for rt in list(result.keys()):
-        if rt == "platform":
+    prefix_map = _prefix_map(project_id)
+    for resource_type in list(result):
+        if resource_type == "platform":
             continue
         for action in VALID_ACTIONS:
             parts = action.split(":", 1)
-            if len(parts) == 2:
-                mapped_rt = prefix_map.get(parts[0], parts[0])
-                if mapped_rt == rt:
-                    result[rt].add(action)
+            if len(parts) != 2:
+                continue
+            if prefix_map.get(parts[0], parts[0]) == resource_type:
+                result[resource_type].add(action)
 
     return {rt: sorted(actions) for rt, actions in sorted(result.items())}
+
+
+def get_valid_actions(project_id: str | None = None) -> set[str]:
+    """指定项目下全部合法 action 的并集。
+
+    用于 CSV 导入等需要校验 action 取值的场景。取值范围随项目策略变化，
+    不再受 VALID_ACTIONS 中 kb/doc 硬编码集合的限制。
+    """
+    actions: set[str] = set()
+    for action_list in get_resource_actions(project_id).values():
+        actions.update(action_list)
+    return actions
+
+
+def get_valid_resource_types(project_id: str | None = None) -> set[str]:
+    """指定项目下全部合法资源类型。"""
+    return set(get_resource_actions(project_id))

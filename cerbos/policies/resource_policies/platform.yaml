@@ -1,0 +1,43 @@
+# 平台管理功能资源策略。
+# Resource IDs 见 app/platform_features.py PLATFORM_FEATURES（12 项）。
+# Actions: platform:read, platform:write
+#
+# 该策略不依赖任何具体项目的派生角色：平台功能对全部项目管理员通用。
+# 运行时的平台权限判定在 api/auth_routes.py:_get_platform_permissions() 中
+# 直接查询 ACL 与平台角色绑定完成，此策略供 /v1/check 与策略模拟器使用。
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: "default"
+  resource: "platform"
+  importDerivedRoles:
+    - platform_roles
+  rules:
+    - actions: ["platform:read", "platform:write"]
+      effect: EFFECT_ALLOW
+      derivedRoles:
+        - platform_admin_role
+
+    - actions: ["platform:read"]
+      effect: EFFECT_ALLOW
+      derivedRoles:
+        - platform_viewer_role
+
+    - actions: ["platform:read"]
+      effect: EFFECT_ALLOW
+      derivedRoles:
+        - platform_granted
+      condition:
+        match:
+          expr: >
+            request.principal.attr.granted_actions[request.resource.id]
+              .exists(x, x == "platform:read" || x == "platform:write")
+
+    - actions: ["platform:write"]
+      effect: EFFECT_ALLOW
+      derivedRoles:
+        - platform_granted
+      condition:
+        match:
+          expr: >
+            request.principal.attr.granted_actions[request.resource.id]
+              .exists(x, x == "platform:write")

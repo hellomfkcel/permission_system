@@ -21,6 +21,7 @@ from schemas.responses import (
 from services.jwt_parser import parse_principal
 from services.acl_resolver import (
     resolve_granted_actions_by_principal,
+    resolve_bound_roles,
     check_subject_ban,
     check_resource_restriction,
     get_resource_attr,
@@ -38,6 +39,24 @@ DECISION_MAP: dict[str, str] = {
     "EFFECT_DENY": "deny",
 }
 # 其他值 (EFFECT_UNSPECIFIED 等) → indeterminate
+
+
+def _project_of(request: Request) -> str | None:
+    """取本次请求归属的项目 ID。
+
+    由 ClientIdValidationMiddleware 从 X-Api-Key / X-Client-Id 解析后注入。
+    授权数据查询按此过滤，实现判定期的项目隔离。
+    """
+    return getattr(request.state, "project_id", None)
+
+
+def _cerbos_roles(jwt_roles: list[str], bound_roles: set[str]) -> list[str]:
+    """构造 Cerbos principal.roles。
+
+    并入平台侧角色绑定，使匹配 roles 字段的策略也能消费角色绑定；
+    默认追加 user，与派生角色的 parentRoles 约定一致。
+    """
+    return sorted({*jwt_roles, *bound_roles, "user"})
 
 
 @router.post("/check", response_model=DecisionResponse)
@@ -65,11 +84,12 @@ async def check_permission(
     except Exception as e:
         raise HTTPException(status_code=401, detail="Invalid credential") from e
 
-    # 2-4. 查询 ACL + 封禁 + 资源属性
+    # 2-4. 查询 ACL + 封禁 + 资源属性（按项目过滤）
+    project_id = _project_of(request)
     channel_kb = body.channel.kb if body.channel else None
     principal_actions = await resolve_granted_actions_by_principal(
         db, principal.principals, body.action, body.resource.type, body.resource.id,
-        channel_kb=channel_kb,
+        channel_kb=channel_kb, project_id=project_id,
     )
     # Build granted_actions dict: {resource_id: [action_suffix, ...]}
     # Cerbos derived roles expect values like ["read"] not ["kb:read"]
@@ -95,7 +115,7 @@ async def check_permission(
                 granted_actions[grant_key].append(suffix)
 
     is_suspended = await check_subject_ban(
-        db, principal.principals, principal.tenant_id,
+        db, principal.principals, principal.tenant_id, project_id,
     )
 
     if is_suspended:
@@ -105,13 +125,14 @@ async def check_permission(
             reasons=["subject_banned"],
         )
 
-    # 5. 构造 Cerbos principal（roles 必须唯一）
-    cerbos_roles: list[str] = list({
-        role for role in principal.roles + ["user"]
-    })
+    # 5. 构造 Cerbos principal（JWT 角色 + 适用的角色绑定）
+    bound_roles = await resolve_bound_roles(
+        db, principal.principals, body.resource.type, body.resource.id,
+        channel_kb=channel_kb, project_id=project_id,
+    )
     cerbos_principal = {
         "id": f"user:{principal.user_id}",
-        "roles": cerbos_roles,
+        "roles": _cerbos_roles(principal.roles, bound_roles),
         "attr": {
             "tenant_id": principal.tenant_id,
             "granted_actions": granted_actions,
@@ -120,7 +141,7 @@ async def check_permission(
 
     # 6. 查 resource attr
     resource_attr = await get_resource_attr(
-        db, body.resource.type, body.resource.id,
+        db, body.resource.type, body.resource.id, project_id,
     )
     if body.channel and body.channel.kb:
         resource_attr["kb_id"] = body.channel.kb
@@ -141,7 +162,7 @@ async def check_permission(
             }],
         )
     except Exception:
-        record_authz_call_failed("check", "connection")
+        record_authz_call_failed("check", "connection", project_id)
         raise  # 重新抛出，由上层 fail-closed 处理
 
     # 8. 三态映射
@@ -151,7 +172,7 @@ async def check_permission(
     decision = DECISION_MAP.get(verdict, "indeterminate")
     decision_id = result.get("cerbosCallId", request_id)
 
-    record_authz_decision("check", decision)
+    record_authz_decision("check", decision, project_id)
 
     return DecisionResponse(
         decision=decision,
@@ -189,8 +210,9 @@ async def check_batch(
         raise HTTPException(status_code=401, detail="Invalid credential") from e
 
     # 2. 型一封禁检查（一次）
+    project_id = _project_of(request)
     is_suspended = await check_subject_ban(
-        db, principal.principals, principal.tenant_id,
+        db, principal.principals, principal.tenant_id, project_id,
     )
     if is_suspended:
         return CheckBatchResponse(
@@ -226,7 +248,7 @@ async def check_batch(
             kb = resource_channels.get(rid)
             pa = await resolve_granted_actions_by_principal(
                 db, principal.principals, action, res_type, rid,
-                channel_kb=kb,
+                channel_kb=kb, project_id=project_id,
             )
             for p_actions in pa.values():
                 for a in p_actions:
@@ -237,13 +259,17 @@ async def check_batch(
                     if suffix not in all_granted[rid]:
                         all_granted[rid].append(suffix)
 
-    # 4. 构造 Cerbos principal（一次）
-    cerbos_roles: list[str] = list({
-        role for role in principal.roles + ["user"]
-    })
+    # 4. 构造 Cerbos principal（JWT 角色 + 批内各资源适用的角色绑定并集）
+    bound_roles: set[str] = set()
+    for item in body.items:
+        bound_roles |= await resolve_bound_roles(
+            db, principal.principals, item.resource.type, item.resource.id,
+            channel_kb=(item.channel.kb if item.channel else None),
+            project_id=project_id,
+        )
     cerbos_principal = {
         "id": f"user:{principal.user_id}",
-        "roles": cerbos_roles,
+        "roles": _cerbos_roles(principal.roles, bound_roles),
         "attr": {
             "tenant_id": principal.tenant_id,
             "granted_actions": all_granted,
@@ -254,7 +280,7 @@ async def check_batch(
     cerbos_resources: list[dict] = []
     for item in body.items:
         resource_attr = await get_resource_attr(
-            db, item.resource.type, item.resource.id,
+            db, item.resource.type, item.resource.id, project_id,
         )
         if item.channel and item.channel.kb:
             resource_attr["kb_id"] = item.channel.kb
@@ -278,7 +304,7 @@ async def check_batch(
         )
     except Exception:
         # fail-closed: 整批判否
-        record_authz_call_failed("check_batch", "connection")
+        record_authz_call_failed("check_batch", "connection", project_id)
         return CheckBatchResponse(
             results=[
                 CheckBatchResult(
@@ -305,7 +331,7 @@ async def check_batch(
         )
         decision = DECISION_MAP.get(verdict, "indeterminate")
 
-        record_authz_decision("check_batch", decision)
+        record_authz_decision("check_batch", decision, project_id)
 
         batch_results.append(CheckBatchResult(
             action=item.action,
@@ -344,10 +370,12 @@ async def filter_items(
     # 1.5 型二封禁检查 — 对每条 item 检查是否有资源限制
     # 被型二封禁的项直接加入 denied，不发送到 Cerbos 判定
     # 设计依据：§2.3.1 restrictions 表 + J-4 联合契约测试发现
+    project_id = _project_of(request)
     pre_denied_ids: set[str] = set()
     for item in body.items:
         restricted_principals = await check_resource_restriction(
             db, item.resource_type, item.resource_id, principal.tenant_id,
+            project_id,
         )
         if restricted_principals and any(
             p in principal.principals for p in restricted_principals
@@ -368,13 +396,13 @@ async def filter_items(
             # Check if user has kb:read on this KB
             kb_actions = await resolve_granted_actions_by_principal(
                 db, principal.principals, "kb:read",
-                "kb", kb_id,
+                "kb", kb_id, project_id=project_id,
             )
             # Also query doc:retrieve ACLs on specific docs (fine-grained access)
             doc_actions = await resolve_granted_actions_by_principal(
                 db, principal.principals, "doc:retrieve",
                 item.resource_type, item.resource_id,
-                channel_kb=kb_id,
+                channel_kb=kb_id, project_id=project_id,
             )
             # Merge: kb:read → "read", doc:retrieve → "read" (both map to read on kb)
             has_access = False
@@ -405,7 +433,7 @@ async def filter_items(
         if item.resource_id in pre_denied_ids:
             continue  # 型二封禁 → 跳过 Cerbos 判定
         resource_attr = await get_resource_attr(
-            db, item.resource_type, item.resource_id,
+            db, item.resource_type, item.resource_id, project_id,
         )
         resource_attr["kb_id"] = item.channel.kb
         resource_attr["tenant_id"] = principal.tenant_id
@@ -420,13 +448,16 @@ async def filter_items(
         })
         cerbos_idx_map.append(idx)
 
-    # 3. 构造 Cerbos principal（roles 必须唯一）
-    cerbos_roles: list[str] = list({
-        role for role in principal.roles + ["user"]
-    })
+    # 3. 构造 Cerbos principal（JWT 角色 + 批内各通道适用的角色绑定并集）
+    bound_roles: set[str] = set()
+    for item in body.items:
+        bound_roles |= await resolve_bound_roles(
+            db, principal.principals, item.resource_type, item.resource_id,
+            channel_kb=item.channel.kb, project_id=project_id,
+        )
     cerbos_principal = {
         "id": f"user:{principal.user_id}",
-        "roles": cerbos_roles,
+        "roles": _cerbos_roles(principal.roles, bound_roles),
         "attr": {
             "tenant_id": principal.tenant_id,
             "granted_actions": granted_actions,
@@ -443,7 +474,7 @@ async def filter_items(
         )
     except Exception:
         # fail-closed: 整批 deny
-        record_authz_call_failed("filter", "connection")
+        record_authz_call_failed("filter", "connection", project_id)
         return FilterResponse(
             allowed=[],
             denied=[item.resource_id for item in body.items],
@@ -465,7 +496,7 @@ async def filter_items(
         else:
             denied.append(item.resource_id)
 
-    record_authz_decision("filter", "allow" if allowed else "deny")
+    record_authz_decision("filter", "allow" if allowed else "deny", project_id)
 
     return FilterResponse(
         allowed=allowed,
