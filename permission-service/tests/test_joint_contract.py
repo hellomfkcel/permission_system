@@ -85,8 +85,11 @@ def _get_service_api_key() -> str:
 
 
 def _unique_id(prefix: str) -> str:
-    """生成确定性唯一 ID（不使用时间戳）。"""
-    return f"{prefix}-{uuid.uuid4().hex[:8]}"
+    """生成确定性唯一 ID（不使用时间戳；含字母避免幂等键时间戳误判）。"""
+    _h = uuid.uuid4().hex[:8]
+    while _h.isdigit():
+        _h = uuid.uuid4().hex[:8]
+    return f"{prefix}-{_h}"
 
 
 class ContractTester:
@@ -114,10 +117,14 @@ class ContractTester:
     # ── 认证 ──
 
     def login(self, username: str, role: str = "user") -> str:
-        """开发模式登录，返回 JWT。"""
+        """开发模式登录，返回 JWT。
+
+        角色由 Keycloak Realm 角色决定（dev-login 不再接受 role 字段），
+        这里保留 role 形参仅为兼容既有调用点；密码取共享测试口令。
+        """
         resp = self.client.post(
             f"{self.base}/api/v1/auth/dev-login",
-            json={"username": username, "tenant": TENANT, "role": role},
+            json={"username": username, "tenant": TENANT, "password": "admin123"},
         )
         assert resp.status_code == 200, f"Login failed: {resp.text}"
         return resp.json()["access_token"]
@@ -147,6 +154,7 @@ class ContractTester:
                 "resource_id": rid,
                 "owner": owner,
                 "tenant_id": TENANT,
+                "project_id": "rag-v14",
                 "idempotency_key": f"rag-register-{TENANT}-{rid}-v1",
             },
             headers=self._v1_headers("reg", "interactive-backend"),
@@ -163,6 +171,7 @@ class ContractTester:
                 "owner": "system",
                 "tenant_id": TENANT,
                 "kb_id": kb_id,
+                "project_id": "rag-v14",
                 "idempotency_key": f"rag-link-{TENANT}-{doc_id}-{kb_id}-v1",
             },
             headers=self._v1_headers("lnk", "interactive-backend"),
@@ -178,6 +187,7 @@ class ContractTester:
                 "resource_id": rid,
                 "owner": "system",
                 "tenant_id": TENANT,
+                "project_id": "rag-v14",
                 "idempotency_key": f"rag-retire-{TENANT}-{rid}-v1",
             },
             headers=self._v1_headers("ret", "interactive-backend"),
@@ -245,6 +255,7 @@ class ContractTester:
                 "resource_id": rid,
                 "action": action,
                 "granted_by": "user:admin",
+                "project_id": "rag-v14",
             },
             headers=self._admin_headers(admin_jwt),
         )
@@ -257,6 +268,7 @@ class ContractTester:
             "tenant_id": TENANT,
             "restriction_type": restriction_type,
             "created_by": "user:admin",
+            "project_id": "rag-v14",
         }
         if principal:
             body["principal"] = principal
@@ -700,12 +712,17 @@ def test_J13_client_id_routing(t: ContractTester):
 def test_J14_check_batch_endpoint(t: ContractTester):
     """J-14: /v1/check/batch 对 interactive-backend 开放，≤200 条/批。"""
     admin_jwt = t.login("admin", "system_admin")
+    alice_jwt = t.login("alice", "user")
     kb_id = _unique_id("j14-kb")
     t.register("kb", kb_id, "user:admin")
 
+    # 仅授予 alice 对该 KB 的 read+write —— 批量端点逐资源独立决策
+    t.grant_acl(admin_jwt, "user:alice", "kb", kb_id, "kb:read")
+    t.grant_acl(admin_jwt, "user:alice", "kb", kb_id, "kb:write")
+
     resp = t.client.post(
         f"{t.base}/v1/check/batch",
-        json={"request_id": _unique_id("j14"), "credential": admin_jwt,
+        json={"request_id": _unique_id("j14"), "credential": alice_jwt,
               "items": [
                   {"action": "kb:read", "resource": {"type": "kb", "id": kb_id}},
                   {"action": "kb:write", "resource": {"type": "kb", "id": kb_id}},

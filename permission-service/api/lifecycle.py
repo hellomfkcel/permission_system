@@ -35,12 +35,19 @@ _IDEMPOTENCY_KEY_RE = re.compile(
 )
 
 # 禁止非确定性模式：
-# 1. 独立的十进制时间戳（10+ 位纯数字，排除 hex UUID 段如 "ef1234567890"）
+# 1. 独立的十进制时间戳（10+ 位纯数字）
 # 2. 显式 timestamp=xxx / ts=xxx 后缀
 # UUID 不作为禁止项——当 UUID 是资源本身的标识符时，它是确定性的。
 _IDEMPOTENCY_FORBIDDEN_RE = re.compile(
     r"((?<![a-f0-9])\d{10,}(?![a-f0-9])|"  # 独立十进制时间戳（不在 hex 上下文中）
     r"(?:ts|timestamp)[-=]?\d+)"              # ts=xxx / timestamp=xxx
+)
+
+# 确定性资源标识符（UUID）——校验时间戳前先掩掉，避免全数字 UUID 段
+# （如 a0000000-0000-0000-0000-000000000001 的末段 0000000001）被误判为时间戳。
+# 2026-08-16 联调发现：RAG 删除文档对 seed KB 的 unlink 因该误判返回 422。
+_IDEMPOTENCY_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
 
 
@@ -50,7 +57,9 @@ def _validate_idempotency_key(key: str, endpoint: str) -> None:
     Raises:
         HTTPException(422): 格式不合法时抛出。
     """
-    if _IDEMPOTENCY_FORBIDDEN_RE.search(key):
+    # UUID 是确定性资源标识符：先掩掉再检查时间戳（§5.2 idempotency_key 设计）
+    masked = _IDEMPOTENCY_UUID_RE.sub("x", key)
+    if _IDEMPOTENCY_FORBIDDEN_RE.search(masked):
         raise HTTPException(
             status_code=422,
             detail={
