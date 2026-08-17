@@ -51,11 +51,15 @@ async def _platform_role_bindings(
     return {row[0] for row in result.fetchall() if row[0]}
 
 
-async def _project_member_role(db: AsyncSession, user_id: str) -> set[str]:
-    """项目成员 → 合成角色 project_member。
+async def _project_member_roles(db: AsyncSession, user_id: str) -> set[str]:
+    """项目成员 → 合成平台角色（区分管理员与只读成员）。
 
-    后端只提供事实（这个用户在 project_members 表里），"成员能看到哪些模块"
-    的规则写在 platform.yaml 的 project_member_baseline 里。
+    project_members.role → 合成角色（"成员能进哪些模块"的规则写在 platform.yaml）：
+        project_admin  → "project_admin"   （项目 7 模块读写）
+        project_viewer → "project_member"   （只读子集）
+
+    取全部 membership 的并集：模块准入表达的是"能进这类模块"，具体操作哪个项目
+    由数据层按 project_id 过滤，因此在任一项目是管理员即获得管理员的模块准入。
 
     project_members.user_id 可能存用户名，也可能存 Keycloak UUID，两种都要匹配。
     """
@@ -69,12 +73,13 @@ async def _project_member_role(db: AsyncSession, user_id: str) -> set[str]:
     if alias:
         candidates.add(alias)
 
-    member = await db.scalar(
-        select(ProjectMember.id)
-        .where(ProjectMember.user_id.in_(candidates))
-        .limit(1)
+    result = await db.execute(
+        select(ProjectMember.role).where(ProjectMember.user_id.in_(candidates))
     )
-    return {"project_member"} if member else set()
+    synthetic: set[str] = set()
+    for (role,) in result.fetchall():
+        synthetic.add("project_admin" if role == "project_admin" else "project_member")
+    return synthetic
 
 
 async def _platform_feature_grants(
@@ -123,7 +128,7 @@ async def resolve_platform_permissions(
 
     principals = _principals_of(user_id)
     bound_roles = await _platform_role_bindings(db, principals)
-    member_roles = await _project_member_role(db, user_id)
+    member_roles = await _project_member_roles(db, user_id)
     granted_actions = await _platform_feature_grants(db, principals)
 
     cerbos_principal = {

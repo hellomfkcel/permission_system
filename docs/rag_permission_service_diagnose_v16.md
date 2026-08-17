@@ -206,3 +206,66 @@ palice 可读（200）。settings 设计为平台专属。该端点只返回只�
 > 项目管理员缺 5 个应见模块且无写权（G2）、policies 读端点可见性与执行不一致（G3）。
 > G1/G3/G4 是明确的守卫缺口可直接修；G2 的修复需先确认 project_admin 与普通成员的
 > 模块与读写边界。
+
+---
+
+## 八、修复与真实栈复验（已完成）
+
+用户确认设计：**project_admin 拿 7 个模块读写，project_viewer 只读子集**。
+G1/G3/G4 直接修。全部修复在同一套真实栈上复验（无 mock）。
+
+### 8.1 改动
+
+| 编号 | 改动 | 文件 |
+|---|---|---|
+| G2 | `_project_member_role` → `_project_member_roles`：按 `project_members.role` 区分，`project_admin`→合成角色 `project_admin`、`project_viewer`→`project_member`（取全部 membership 并集） | `services/platform_authorizer.py` |
+| G2 | platform.yaml：`project_admin_manage`（7 模块读写）+ `project_admin_dashboard`（概览读）+ `project_member_readonly`（dashboard/resource_mgmt/role_mgmt 只读） | `platform.yaml` |
+| G1 | tenant_routes 全部 9 个端点加 `require_platform_permission("tenant_mgmt", read/write)` | `api/tenant_routes.py` |
+| G3 | `GET /policies` 加 `require_platform_permission("policy_mgmt", "platform:read")` | `api/audit_routes.py` |
+| G4 | `/auth/config` 软门：无 `settings:read` 时脱敏 service_port/cerbos_pdp_url/keycloak_*/rate_limits/derived_roles_count/resource_rules，资源目录（resource_actions/labels/features）始终返回，不切断项目管理员授权链路 | `api/auth_routes.py` |
+
+**G4 的关键**：`/auth/config` 同时服务 Settings 页面（平台专属）和权限授予对话框
+（项目管理员必用）。因此不能整体加守卫，而是软门 —— 脱敏敏感字段但保留资源目录。
+符合"不在必要链路上 skip 环节"。
+
+### 8.2 复验（真实 HTTP，三身份）
+
+**G2 · me/access**（读=r，读写=rw）：
+
+```
+项目管理员 palice(project_admin):
+  {audit_mgmt:rw, dashboard:r, permission_mgmt:rw, playground:rw,
+   policy_mgmt:rw, resource_mgmt:rw, restriction_mgmt:rw, role_mgmt:rw}   ← 正好 7 模块读写 + dashboard 读
+只读成员 pviewer(project_viewer):
+  {dashboard:r, resource_mgmt:r, role_mgmt:r}                             ← 只读子集
+```
+
+**执行层复验**：
+
+| 场景 | 修前 | 修后 |
+|---|---|---|
+| G1 palice POST /tenants | 201（越权建租户） | **403** |
+| G1 palice GET /tenants | 200 | **403** |
+| G1 平台管理员 GET /tenants | 200 | 200（不受影响） |
+| G2 palice POST /roles/definitions（建角色） | 403 | **201** |
+| G2 palice GET /restrictions（封禁） | 403 | **200** |
+| G2 palice POST /simulate（策略模拟） | 403 | **200** |
+| G3 palice GET /policies | 200（与 me/access 矛盾） | 200（现 me/access 也授 policy_mgmt，一致） |
+| G3 pviewer GET /policies | — | **403**（与 me/access 一致） |
+| pviewer POST /roles/definitions（写） | — | **403**（只读） |
+| G4 palice /auth/config 敏感字段 | 明文可读 | **脱敏**（port=0/cerbos=''/keycloak=''），资源目录仍返回 |
+| G4 平台管理员 /auth/config | 明文 | 明文（不受影响） |
+
+**回归确认**：
+- 项目隔离仍成立：palice 建的 `pa_role` 归属 `project_id=rag-v14`，生成的策略集合名
+  `custom_roles_rag_v14`（F2 隔离生效），删除走真实 API 返回 204。
+- 平台管理员访问不受任何影响（tenant/config 均正常）。
+- 离线测试：策略约定 10/10、解析器 11/11 通过；后端 compileall 通过。
+
+### 8.3 一个未决的分类点
+
+`user_mgmt`（用户与组）与 `dashboard` 不在用户给出的"3 平台 + 7 项目"分类中。
+本次处理：`dashboard` 对所有身份只读可见（登录首页）；`user_mgmt` 未纳入项目角色的
+模块集，故项目管理员看不到 user_mgmt，仅平台管理员/platform_viewer 可见。
+如需项目管理员也能管理本项目成员，可把 user_mgmt 加入 `project_admin_manage` 的
+模块列表 —— 属设计选择，待确认。
