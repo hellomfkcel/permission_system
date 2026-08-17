@@ -1,12 +1,19 @@
 """角色管理 API — 角色定义 CRUD + 权限矩阵。
 
-设计依据：docs/manage_role_design.md §3.2 API 设计。
+设计依据：docs/permission_model_v2.md §3 数据来源边界。
 
-一致性约定（修复角色定义双写分叉）：
-- 权限的唯一权威源是 Cerbos 策略文件；role_definitions 表保存档案信息
-  （描述、父角色、项目归属、是否内置），不再作为权限的独立数据源。
+一致性约定：
+- 权限的唯一权威源是 Cerbos 策略文件。role_definitions 表只保存档案信息
+  （描述、激活角色、项目归属、是否内置），表里已无 permissions 列
+  （迁移 f1a2b3c4d5e6），因此不存在需要同步的副本。
 - 写路径先写策略文件，再提交数据库；数据库失败时回滚文件。
-- 读路径统一走 _role_permissions()，管理台展示与判定链路取值同源。
+- 读路径统一走 _role_view()，管理台展示与判定链路取值同源。
+
+作用域约定（修复"无策略项目显示其他项目权限"）：
+角色的权限按**查询所处的项目**解析，而不是按角色自身的 project_id。
+平台级角色（project_id IS NULL）在 demo-project 下只应显示 demo-project 与
+平台层策略授予它的动作；此前一律按全局并集计算，rag-v14 的 kb:read / doc:*
+会出现在一个连策略目录都没有的项目里。
 """
 
 import structlog
@@ -23,6 +30,7 @@ from api.auth_routes import (
 )
 from schemas.responses import Principal
 from services.cerbos_policy_parser import (
+    describe_role,
     get_policy_index,
     get_role_effective_permissions,
     invalidate_role_actions_cache,
@@ -49,13 +57,19 @@ class RoleDefOut(BaseModel):
     id: str
     name: str
     description: str
+    # 激活该角色的身份角色。字段名保留以兼容既有前端，语义是"激活条件"而非
+    # "权限继承"：activated_by 是同一份数据的正名。
     parent_keycloak_roles: list[str] = []
+    activated_by: list[str] = []
+    kind: str = "derived"           # derived=派生角色（持权） identity=身份角色（入场资格）
+    activation: str = "identity"    # identity | grant | acl，见 cerbos_policy_parser
     is_system: bool
     is_keycloak_role: bool = False  # Keycloak 身份角色（user/system_admin）
-    permissions: list[str] = []
+    permissions: list[str] = []     # 查询作用域内策略授予的动作
+    conditional_permissions: list[str] = []  # 其中需运行时授权记录才生效的子集
     binding_count: int = 0
     project_id: str | None = None   # NULL=平台级角色，否则为项目级角色
-    policy_synced: bool = True      # 策略文件中是否存在该角色
+    policy_synced: bool = True      # 策略文件中是否存在该角色（计算得出，不入库）
     created_at: str = ""
 
 
@@ -87,31 +101,44 @@ class UpdateRoleRequest(BaseModel):
 
 
 def _role_permissions(name: str, project_id: str | None) -> list[str]:
-    """返回角色的**有效权限**列表（含身份角色的继承并集）。
+    """返回角色在指定作用域内被策略直接授予的动作。
 
-    取值只来自 Cerbos 策略文件（唯一权威源）：
-    - 派生角色（admin/kb_reader 等）→ 策略中声明的动作；
-    - Keycloak 身份角色（system_admin/user 等被 parentRoles 引用的角色）
-      → 所有以其为父的派生角色权限的**并集**。
-
-    修复：此前对身份角色硬编码返回 []，管理台显示"无权限"，但判定链路
-    （system_admin → admin 派生角色）实际授予全部权限 —— 展示与判定脱节。
-    现在展示 = 策略解析出来的有效权限，与判定同源。
+    取值只来自 Cerbos 策略文件（唯一权威源），且不做 parentRoles 并集 ——
+    parentRoles 是激活条件，把子角色权限并给父角色会让 user 显示成全权角色，
+    反过来又让"继承了 user 的" kb_reader 看起来权限反而更少。
     """
     return get_role_effective_permissions(name, project_id)
 
 
 def _to_out(
-    r: RoleDefinition, binding_count: int, permissions: list[str], synced: bool,
+    r: RoleDefinition,
+    binding_count: int,
+    scope_project_id: str | None,
 ) -> RoleDefOut:
+    """组装角色视图。
+
+    Args:
+        scope_project_id: 查询所处的项目作用域（不是角色自身的 project_id），
+            权限按它解析，避免跨项目串味。
+    """
+    view = describe_role(r.name, scope_project_id)
+    index = get_policy_index()
+    synced = (
+        r.name in _KEYCLOAK_IDENTITY_ROLES
+        or r.name in index.visible_roles(scope_project_id)
+    )
     return RoleDefOut(
         id=str(r.id),
         name=r.name,
         description=r.description or "",
-        parent_keycloak_roles=r.parent_keycloak_roles or [],
+        parent_keycloak_roles=view["activated_by"] or (r.parent_keycloak_roles or []),
+        activated_by=view["activated_by"] or (r.parent_keycloak_roles or []),
+        kind=view["kind"],
+        activation=view["activation"],
         is_system=r.is_system,
         is_keycloak_role=(r.name in _KEYCLOAK_IDENTITY_ROLES),
-        permissions=permissions,
+        permissions=view["permissions"],
+        conditional_permissions=view["conditional_permissions"],
         binding_count=binding_count,
         project_id=r.project_id,
         policy_synced=synced,
@@ -174,26 +201,25 @@ async def list_role_definitions(
     roles = result.scalars().all()
 
     counts = await _binding_counts(db, [r.name for r in roles])
-    index = get_policy_index()
 
-    out: list[RoleDefOut] = []
-    for r in roles:
-        permissions = _role_permissions(r.name, r.project_id)
-        synced = (
-            r.name in _KEYCLOAK_IDENTITY_ROLES
-            or r.name in index.visible_roles(r.project_id)
-        )
-        out.append(_to_out(r, counts.get(r.name, 0), permissions, synced))
-    return out
+    # 权限按查询作用域解析：项目模式下平台级角色只显示该项目内的动作。
+    return [_to_out(r, counts.get(r.name, 0), project_id) for r in roles]
 
 
 @router.get("/definitions/{name}", response_model=RoleDetailOut)
 async def get_role_definition(
     name: str,
+    project_id: str | None = Query(
+        None, description="查询作用域；不传则按角色自身归属解析权限",
+    ),
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
 ) -> RoleDetailOut:
-    """获取单个角色详情。需要管理员认证。"""
+    """获取单个角色详情。需要管理员认证。
+
+    权限按 project_id 指定的作用域解析，与列表页取值同源；不传时退回角色
+    自身的 project_id（平台级角色即全局视图）。
+    """
     result = await db.execute(
         select(RoleDefinition).where(RoleDefinition.name == name)
     )
@@ -202,16 +228,8 @@ async def get_role_definition(
         raise HTTPException(status_code=404, detail=f"Role not found: {name}")
 
     counts = await _binding_counts(db, [name])
-    index = get_policy_index()
-    synced = (
-        name in _KEYCLOAK_IDENTITY_ROLES
-        or name in index.visible_roles(r.project_id)
-    )
-    return RoleDetailOut(
-        **_to_out(
-            r, counts.get(name, 0), _role_permissions(name, r.project_id), synced,
-        ).model_dump()
-    )
+    scope = project_id or r.project_id
+    return RoleDetailOut(**_to_out(r, counts.get(name, 0), scope).model_dump())
 
 
 @router.post("/definitions", response_model=RoleDefOut, status_code=201)
@@ -257,11 +275,11 @@ async def create_role_definition(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # 2. 写数据库；失败则回滚文件
+    # 表里不存 permissions：动作已写进策略文件，那是唯一权威源。
     rd = RoleDefinition(
         name=body.name,
         description=body.description or "",
         parent_keycloak_roles=body.parent_keycloak_roles,
-        permissions=list(body.permissions),
         is_system=False,
         project_id=body.project_id,
     )
@@ -278,7 +296,7 @@ async def create_role_definition(
         ) from exc
 
     invalidate_role_actions_cache()
-    return _to_out(rd, 0, _role_permissions(rd.name, rd.project_id), True)
+    return _to_out(rd, 0, rd.project_id)
 
 
 @router.put("/definitions/{name}", response_model=RoleDefOut)
@@ -316,10 +334,12 @@ async def update_role_definition(
         if body.parent_keycloak_roles is not None
         else (r.parent_keycloak_roles or ["user"])
     )
+    # 未指定权限时，从策略索引取该角色当前的动作作为基线 ——
+    # DB 里已不存权限副本，策略文件就是当前值。
     permissions = (
         body.permissions
         if body.permissions is not None
-        else list(r.permissions or [])
+        else _role_permissions(name, r.project_id)
     )
 
     try:
@@ -331,7 +351,6 @@ async def update_role_definition(
         if body.description is not None:
             r.description = body.description
         r.parent_keycloak_roles = parents
-        r.permissions = permissions
         await db.commit()
         await db.refresh(r)
     except Exception as exc:
@@ -344,9 +363,7 @@ async def update_role_definition(
 
     invalidate_role_actions_cache()
     counts = await _binding_counts(db, [name])
-    return _to_out(
-        r, counts.get(name, 0), _role_permissions(name, r.project_id), True,
-    )
+    return _to_out(r, counts.get(name, 0), r.project_id)
 
 
 @router.delete("/definitions/{name}", status_code=204)

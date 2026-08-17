@@ -1,15 +1,42 @@
+# ══════════════════════════════════════════════════════════════
+# Layer 3 · 项目业务层 — rag-v14 派生角色定义
+# ══════════════════════════════════════════════════════════════
+#
+# 派生角色是**真正的权限持有者**；parentRoles 只是「被哪个 Keycloak 身份角色
+# 激活」的前置条件，不是权限继承 —— user 本身在项目层不持有任何权限。
+#
+# 三路授权并行，任一命中即 ALLOW：
+#   ABAC 项目级 / KB 级  principal.attr.granted_actions（后端从 granted_actions 表注入）
+#   ACL 用户级           resource.attr.acl（后端从 resource_acl 表注入）
+#   ACL 角色级           resource.attr.role_acl（同上）
+#
+# granted_actions 的键有两级并存：
+#   {"rag-v14": ["manage"]}  项目级 → project_admin，覆盖项目内全部 KB
+#   {"kb-001": ["read"]}     KB 级  → kb_reader/kb_writer/kb_admin，仅该 KB
+#
+# 表达式中对 granted_actions 先做 `in` 判存再索引：CEL 索引不存在的键会求值出错，
+# Cerbos 会把出错的条件按不匹配处理，掩盖真实原因。
 apiVersion: api.cerbos.dev/v1
 derivedRoles:
   name: rag_roles
   definitions:
+
+    # ── ABAC：KB 级角色 ─────────────────────────────────────────
+    # kb_id 取值：操作 kb 资源本身用 resource.id，操作 document 用 resource.attr.kb_id。
+
     - name: kb_reader
       parentRoles: ["user"]
       condition:
         match:
           expr: >
             has(request.principal.attr.granted_actions) &&
+            (request.resource.kind == "kb"
+              ? request.resource.id
+              : request.resource.attr.kb_id) in request.principal.attr.granted_actions &&
             request.principal.attr.granted_actions[
-              request.resource.kind == "kb" ? request.resource.id : request.resource.attr.kb_id
+              request.resource.kind == "kb"
+                ? request.resource.id
+                : request.resource.attr.kb_id
             ].exists(x, x == "read")
 
     - name: kb_writer
@@ -18,8 +45,13 @@ derivedRoles:
         match:
           expr: >
             has(request.principal.attr.granted_actions) &&
+            (request.resource.kind == "kb"
+              ? request.resource.id
+              : request.resource.attr.kb_id) in request.principal.attr.granted_actions &&
             request.principal.attr.granted_actions[
-              request.resource.kind == "kb" ? request.resource.id : request.resource.attr.kb_id
+              request.resource.kind == "kb"
+                ? request.resource.id
+                : request.resource.attr.kb_id
             ].exists(x, x == "write")
 
     - name: kb_admin
@@ -28,12 +60,63 @@ derivedRoles:
         match:
           expr: >
             has(request.principal.attr.granted_actions) &&
+            (request.resource.kind == "kb"
+              ? request.resource.id
+              : request.resource.attr.kb_id) in request.principal.attr.granted_actions &&
             request.principal.attr.granted_actions[
-              request.resource.kind == "kb" ? request.resource.id : request.resource.attr.kb_id
+              request.resource.kind == "kb"
+                ? request.resource.id
+                : request.resource.attr.kb_id
             ].exists(x, x == "manage")
 
-    - name: admin
-      parentRoles: ["system_admin"]
+    # ── ABAC：项目级角色 ────────────────────────────────────────
+    # 与 kb_admin 的区别：kb_admin 只管单个 KB（不可 kb:grant / doc:share），
+    # project_admin 覆盖整个项目并可向他人授权，权限扩散边界止于此。
+
+    - name: project_admin
+      parentRoles: ["user"]
+      condition:
+        match:
+          expr: >
+            has(request.principal.attr.granted_actions) &&
+            has(request.resource.attr.project_id) &&
+            request.resource.attr.project_id in request.principal.attr.granted_actions &&
+            request.principal.attr.granted_actions[
+              request.resource.attr.project_id
+            ].exists(x, x == "manage")
+
+    # ── 平台级兜底 ──────────────────────────────────────────────
+    # system_admin / platform_admin 在项目层通过此派生角色获得全部动作，
+    # 资源策略中不再直接出现 roles: ["system_admin"]，避免身份角色在项目层持权。
+
+    # parentRoles 含历史角色名 admin：早期版本用 admin 作为超管派生角色名，
+    # 存量 role_bindings 仍以该名绑定，保留以免这些绑定在判定期静默失效。
+    - name: platform_admin_role
+      parentRoles: ["system_admin", "platform_admin", "admin"]
       condition:
         match:
           expr: "true"
+
+    # ── ACL：用户级 ─────────────────────────────────────────────
+    # resource.attr.acl 形如 {"user:alice": ["doc:view", "doc:download"]}，
+    # 键与 principal.id 同形（user:<user_id>）。
+    # 此处只判断「该主体是否在 ACL 中」，具体动作由资源策略规则的条件判断。
+
+    - name: acl_user
+      parentRoles: ["user"]
+      condition:
+        match:
+          expr: >
+            has(request.resource.attr.acl) &&
+            request.principal.id in request.resource.attr.acl
+
+    # ── ACL：角色级 ─────────────────────────────────────────────
+    # resource.attr.role_acl 形如 {"reviewer": ["doc:view"]}，键为角色名。
+
+    - name: acl_role
+      parentRoles: ["user"]
+      condition:
+        match:
+          expr: >
+            has(request.resource.attr.role_acl) &&
+            request.principal.roles.exists(r, r in request.resource.attr.role_acl)

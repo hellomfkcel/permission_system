@@ -102,28 +102,126 @@ async def resolve_bound_roles(
     return {role for _, role in bindings}
 
 
-async def resolve_granted_actions_by_principal(
+def _scope_key(
+    resource_type: str, resource_id: str, channel_kb: str | None,
+) -> str:
+    """granted_actions 的作用域键。
+
+    文档挂在 KB 通道下，其 ABAC 授权记在 KB 上（策略里 kb_* 派生角色对文档
+    资源读 resource.attr.kb_id）；其余资源类型以自身 ID 为作用域。
+    """
+    if resource_type == "document" and channel_kb:
+        return channel_kb
+    return resource_id
+
+
+async def _project_manage_grant(
+    db: AsyncSession, principals: list[str], project_id: str | None,
+) -> bool:
+    """当前主体是否是该项目的管理员（project_members.role=project_admin）。
+
+    项目级 manage 授权的事实来源就是项目成员表，不另存一份授权记录。
+    """
+    if not project_id:
+        return False
+
+    from models.project import ProjectMember
+    from models.user_cache import UserCache
+
+    user_ids = [p.split(":", 1)[1] for p in principals if p.startswith("user:")]
+    if not user_ids:
+        return False
+
+    # project_members.user_id 可能存用户名，也可能存 UUID，两种都要匹配上
+    alias_result = await db.execute(
+        select(UserCache.user_id).where(UserCache.username.in_(user_ids))
+    )
+    candidates = set(user_ids) | {row[0] for row in alias_result.fetchall() if row[0]}
+
+    member_role = await db.scalar(
+        select(ProjectMember.role)
+        .where(
+            ProjectMember.project_id == project_id,
+            ProjectMember.user_id.in_(candidates),
+            ProjectMember.role.in_(["project_admin", "owner"]),
+        )
+        .limit(1)
+    )
+    return member_role is not None
+
+
+async def resolve_granted_actions(
     db: AsyncSession,
     principals: list[str],
-    action: str,
     resource_type: str,
     resource_id: str,
     channel_kb: str | None = None,
     project_id: str | None = None,
 ) -> dict[str, list[str]]:
-    """查询 ACL + role_bindings 中匹配任意 principal 的 action 列表。
+    """构造 Cerbos 的 principal.attr.granted_actions（ABAC 路唯一入口）。
 
-    返回 {principal: [action, ...]} 映射。
+    两级作用域并存，与 rag_roles.yaml 中派生角色的取键方式一一对应：
 
-    角色到动作的映射从 Cerbos 策略解析（services/cerbos_policy_parser.py），
-    策略文件是唯一权威源。
+        {"<kb_id>":     ["read", "write", ...]}  KB 级 → kb_reader/writer/admin
+        {"<project_id>": ["manage"]}             项目级 → project_admin
+
+    动作以策略里派生角色比对的后缀形式给出（"kb:read" → "read"）。
+
+    事实来源：
+      - KB 级 → acl_entries 中记在该 KB 上的授权 + 适用于该资源的角色绑定；
+      - 项目级 → project_members 中的 project_admin 成员资格。
+
+    资源实例级的直授（文档级 ACL）不在这里 —— 它走 resource.attr.acl 的
+    ACL 路（见 get_resource_acl）。此前把文档级 ACL 也折进本函数的结果里，
+    /filter 甚至把单篇文档的 doc:retrieve 映射成整个 KB 的 "read"，
+    一条文档授权会放大成 KB 级可见性。两路分开后不再有这种放大。
     """
+    scope = _scope_key(resource_type, resource_id, channel_kb)
+    granted: dict[str, list[str]] = {}
+
+    def _add(key: str, action: str) -> None:
+        suffix = action.split(":", 1)[-1] if ":" in action else action
+        bucket = granted.setdefault(key, [])
+        if suffix not in bucket:
+            bucket.append(suffix)
+
+    # ── KB / 容器级 ACL ──
+    scope_type = "kb" if (resource_type == "document" and channel_kb) else resource_type
+    scope_actions = await _container_acl_actions(
+        db, principals, scope_type, scope, project_id,
+    )
+    for action in scope_actions:
+        _add(scope, action)
+
+    # ── 角色绑定展开 ──
     from services.cerbos_policy_parser import get_role_actions_map
 
     role_actions_map = get_role_actions_map(project_id)
-    now = datetime.now(timezone.utc)
+    bindings = await _applicable_bindings(
+        db, principals, resource_type, resource_id, channel_kb, project_id,
+    )
+    for _, role in bindings:
+        for implicit in role_actions_map.get(role, []):
+            _add(scope, implicit)
 
-    # ── 1. 直接 ACL 查询 ──
+    # ── 项目级 manage ──
+    if await _project_manage_grant(db, principals, project_id):
+        granted.setdefault(project_id, [])
+        if "manage" not in granted[project_id]:
+            granted[project_id].append("manage")
+
+    return granted
+
+
+async def _container_acl_actions(
+    db: AsyncSession,
+    principals: list[str],
+    resource_type: str,
+    resource_id: str,
+    project_id: str | None,
+) -> list[str]:
+    """查询记在某容器（KB / 平台功能等）上的、属于当前主体的 ACL 动作。"""
+    now = datetime.now(timezone.utc)
     conditions = [
         ACLEntry.principal.in_(principals),
         ACLEntry.resource_type == resource_type,
@@ -132,26 +230,68 @@ async def resolve_granted_actions_by_principal(
         or_(ACLEntry.expires_at.is_(None), ACLEntry.expires_at > now),
     ]
     _scoped(conditions, ACLEntry, project_id)
+    result = await db.execute(select(ACLEntry.action).where(*conditions))
+    return [row[0] for row in result.fetchall()]
+
+
+async def get_resource_acl(
+    db: AsyncSession,
+    resource_type: str,
+    resource_id: str,
+    principals: list[str],
+    principal_id: str,
+    project_id: str | None = None,
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """读取资源实例级 ACL，构造 Cerbos 的 resource.attr.acl / role_acl。
+
+    对应策略中的 acl_user / acl_role 两个派生角色（见 rag_roles.yaml）：
+    ACL 是"资源 → 主体"方向的授权，与 granted_actions 的"主体 → 资源"方向
+    完全独立，任一命中即放行。
+
+    数据来源是既有的 acl_entries 表 —— 它的 (principal, resource_type,
+    resource_id, action) 已经完整表达了"哪个资源实例允许谁做什么"。
+    不另建 ACL 表：同一事实存在于两处就必然会产生不一致。
+
+    Returns:
+        (acl, role_acl)
+        acl      {principal_id: [action, ...]}  当前主体（含其所属组）被直授的动作。
+                 键统一为 Cerbos principal.id，因为策略只能拿到这一个标识；
+                 group: 前缀的授权在此并入当前主体，无需在策略里表达组模型。
+        role_acl {role_name: [action, ...]}     该资源上按角色直授的动作。
+                 键为角色名，Cerbos 侧与 principal.roles 求交集。
+    """
+    now = datetime.now(timezone.utc)
+
+    conditions = [
+        ACLEntry.resource_type == resource_type,
+        ACLEntry.resource_id == resource_id,
+        ACLEntry.revoked == False,  # noqa: E712
+        or_(ACLEntry.expires_at.is_(None), ACLEntry.expires_at > now),
+        or_(
+            ACLEntry.principal.in_(principals),
+            ACLEntry.principal.startswith("role:"),
+        ),
+    ]
+    _scoped(conditions, ACLEntry, project_id)
 
     result = await db.execute(
         select(ACLEntry.principal, ACLEntry.action).where(*conditions)
     )
 
-    mapping: dict[str, list[str]] = {}
-    for row in result.fetchall():
-        mapping.setdefault(row[0], []).append(row[1])
+    acl: dict[str, list[str]] = {}
+    role_acl: dict[str, list[str]] = {}
+    for principal, action in result.fetchall():
+        if principal.startswith("role:"):
+            role = principal.split(":", 1)[1]
+            if not role:
+                continue
+            bucket = role_acl.setdefault(role, [])
+        else:
+            bucket = acl.setdefault(principal_id, [])
+        if action not in bucket:
+            bucket.append(action)
 
-    # ── 2. 角色绑定展开为隐式动作 ──
-    bindings = await _applicable_bindings(
-        db, principals, resource_type, resource_id, channel_kb, project_id,
-    )
-    for rb_principal, rb_role in bindings:
-        for implicit in role_actions_map.get(rb_role, []):
-            mapping.setdefault(rb_principal, [])
-            if implicit not in mapping[rb_principal]:
-                mapping[rb_principal].append(implicit)
-
-    return mapping
+    return acl, role_acl
 
 
 async def check_subject_ban(
@@ -207,7 +347,11 @@ async def get_resource_attr(
     """查询 resource_registry 获取资源的 Cerbos attr。
 
     Returns:
-        {retired, owner, tenant_id, is_enabled, allow_download}。
+        {retired, owner, tenant_id, is_enabled, allow_download, project_id}。
+
+    project_id 必须随属性下发：project_admin 派生角色按
+    request.resource.attr.project_id 查 granted_actions，缺失则项目级授权
+    在判定期完全不生效。
 
     资源未注册时必须显式返回 retired=False：Cerbos CEL 条件 "retired == false"
     在属性缺失时求值为 null == false → false，会导致全部规则判 deny。
@@ -225,6 +369,7 @@ async def get_resource_attr(
             "retired": False,
             "is_enabled": True,
             "allow_download": True,
+            "project_id": project_id or "",
         }
     return {
         "retired": row.retired,
@@ -232,6 +377,7 @@ async def get_resource_attr(
         "tenant_id": row.tenant_id,
         "is_enabled": row.is_enabled,
         "allow_download": row.allow_download,
+        "project_id": row.project_id or project_id or "",
     }
 
 

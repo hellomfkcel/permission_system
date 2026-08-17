@@ -20,10 +20,11 @@ from schemas.responses import (
 )
 from services.jwt_parser import parse_principal
 from services.acl_resolver import (
-    resolve_granted_actions_by_principal,
+    resolve_granted_actions,
     resolve_bound_roles,
     check_subject_ban,
     check_resource_restriction,
+    get_resource_acl,
     get_resource_attr,
 )
 from services.cerbos_adapter import get_cerbos
@@ -59,6 +60,37 @@ def _cerbos_roles(jwt_roles: list[str], bound_roles: set[str]) -> list[str]:
     return sorted({*jwt_roles, *bound_roles, "user"})
 
 
+async def _build_resource(
+    db: AsyncSession,
+    principal,
+    resource_type: str,
+    resource_id: str,
+    channel_kb: str | None,
+    project_id: str | None,
+) -> dict:
+    """组装 Cerbos resource.attr。
+
+    三类属性分别有唯一出处：
+      业务属性（retired / is_enabled / allow_download / project_id）→ resource_registry
+      通道属性（kb_id）                                            → 请求中的 channel
+      ACL（acl / role_acl）                                        → acl_entries
+    策略文件里不含任何用户 ID 或角色名，全部由此处注入。
+    """
+    attr = await get_resource_attr(db, resource_type, resource_id, project_id)
+    if channel_kb:
+        attr["kb_id"] = channel_kb
+
+    acl, role_acl = await get_resource_acl(
+        db, resource_type, resource_id,
+        principals=principal.principals,
+        principal_id=f"user:{principal.user_id}",
+        project_id=project_id,
+    )
+    attr["acl"] = acl
+    attr["role_acl"] = role_acl
+    return attr
+
+
 @router.post("/check", response_model=DecisionResponse)
 @limiter.limit(f"{settings.check_rate_limit}/second")
 async def check_permission(
@@ -72,11 +104,11 @@ async def check_permission(
 
     流程：
     1. 解析 JWT → Principal
-    2. 查询 ACL + role_bindings → granted_actions
+    2. ABAC 路：KB / 项目级授权 → principal.attr.granted_actions
     3. 查询 restrictions → 型一封禁检查
-    4. 构造 Cerbos principal + resource
-    5. 调用 Cerbos /api/check/resources
-    6. 三态映射
+    4. ACL 路：资源实例级授权 → resource.attr.acl / role_acl
+    5. 调用 Cerbos /api/check/resources（唯一决策点）
+    6. 三态映射，后端无条件遵从判定结果
     """
     # 1. 解析主体
     try:
@@ -84,35 +116,17 @@ async def check_permission(
     except Exception as e:
         raise HTTPException(status_code=401, detail="Invalid credential") from e
 
-    # 2-4. 查询 ACL + 封禁 + 资源属性（按项目过滤）
+    # 2-4. 查询授权记录 + 封禁 + 资源属性（按项目过滤）
     project_id = _project_of(request)
     channel_kb = body.channel.kb if body.channel else None
-    principal_actions = await resolve_granted_actions_by_principal(
-        db, principal.principals, body.action, body.resource.type, body.resource.id,
+
+    # ABAC 路：{kb_id: [...], project_id: ["manage"]}
+    # 键的取法与 rag_roles.yaml 中派生角色一致（kb 资源用 resource.id，
+    # document 资源用 kb_id），项目级授权另以 project_id 为键。
+    granted_actions = await resolve_granted_actions(
+        db, principal.principals, body.resource.type, body.resource.id,
         channel_kb=channel_kb, project_id=project_id,
     )
-    # Build granted_actions dict: {resource_id: [action_suffix, ...]}
-    # Cerbos derived roles expect values like ["read"] not ["kb:read"]
-    # e.g. {"kb-xxx": ["read", "write"], "kb-yyy": ["read"]}
-    #
-    # P1-4 修复：对于 document 资源，granted_actions 必须以 kb_id 为键
-    # （而非 doc_id），因为 Cerbos derivedRoles rag_roles.yaml 在资源类型非 kb 时
-    # 从 request.resource.attr.kb_id 取值查找 granted_actions。
-    # 错误：granted_actions[doc_id] → Cerbos 找不到 → 判定为 deny
-    # 正确：granted_actions[kb_id] → Cerbos 正确匹配 derived role
-    granted_actions: dict[str, list[str]] = {}
-    # 确定 granted_actions 的键：kb 资源用 resource.id，document 资源用 channel.kb
-    grant_key = body.resource.id
-    if body.resource.type == "document" and body.channel and body.channel.kb:
-        grant_key = body.channel.kb
-    for p_actions in principal_actions.values():
-        for action_name in p_actions:
-            # Strip resource prefix: "kb:read" → "read", "doc:view" → "view"
-            suffix = action_name.split(":", 1)[-1] if ":" in action_name else action_name
-            # Associate with the correct key (kb_id for docs, resource_id for kbs)
-            granted_actions.setdefault(grant_key, [])
-            if suffix not in granted_actions[grant_key]:
-                granted_actions[grant_key].append(suffix)
 
     is_suspended = await check_subject_ban(
         db, principal.principals, principal.tenant_id, project_id,
@@ -139,12 +153,10 @@ async def check_permission(
         },
     }
 
-    # 6. 查 resource attr
-    resource_attr = await get_resource_attr(
-        db, body.resource.type, body.resource.id, project_id,
+    # 6. 查 resource attr（业务属性 + ACL 路的 acl / role_acl）
+    resource_attr = await _build_resource(
+        db, principal, body.resource.type, body.resource.id, channel_kb, project_id,
     )
-    if body.channel and body.channel.kb:
-        resource_attr["kb_id"] = body.channel.kb
 
     # 7. Cerbos 判定
     cerbos = get_cerbos()
@@ -229,35 +241,21 @@ async def check_batch(
             request_id=request_id,
         )
 
-    # 3. 收集所有唯一的 (action, resource_type) 组合以查询 ACL
-    # 查询所有 ACL：对每个不同的 action+resource_type 批量查询
-    action_resources: dict[tuple[str, str], set[str]] = {}
-    # 同时跟踪每个 resource_id 对应的 channel_kb（document 资源的 KB 归属）
-    resource_channels: dict[str, str | None] = {}
-    for item in body.items:
-        key = (item.action, item.resource.type)
-        action_resources.setdefault(key, set()).add(item.resource.id)
-        if item.resource.type == "document" and item.channel and item.channel.kb:
-            resource_channels[item.resource.id] = item.channel.kb
-
-    # 聚合 granted_actions: {resource_id: [action_suffix, ...]}
-    # P1-4 修复：document 资源以 kb_id 为键（与单条 check 一致）
+    # 3. 聚合全批的 granted_actions（键为 kb_id / project_id，与单条 check 同源）
+    # 此前这里以 resource_id 为键，document 资源的授权因此落在 doc_id 上，
+    # 而策略按 kb_id 查找 —— 批量端点与单条端点判定结果不一致。
     all_granted: dict[str, list[str]] = {}
-    for (action, res_type), res_ids in action_resources.items():
-        for rid in res_ids:
-            kb = resource_channels.get(rid)
-            pa = await resolve_granted_actions_by_principal(
-                db, principal.principals, action, res_type, rid,
-                channel_kb=kb, project_id=project_id,
-            )
-            for p_actions in pa.values():
-                for a in p_actions:
-                    suffix = a.split(":", 1)[-1] if ":" in a else a
-                    # document 资源使用 kb_id 作为 granted_actions 键
-                    # 需要在下方 Cerbos resources 循环中补充处理
-                    all_granted.setdefault(rid, [])
-                    if suffix not in all_granted[rid]:
-                        all_granted[rid].append(suffix)
+    for item in body.items:
+        item_granted = await resolve_granted_actions(
+            db, principal.principals, item.resource.type, item.resource.id,
+            channel_kb=(item.channel.kb if item.channel else None),
+            project_id=project_id,
+        )
+        for key, actions in item_granted.items():
+            bucket = all_granted.setdefault(key, [])
+            for action in actions:
+                if action not in bucket:
+                    bucket.append(action)
 
     # 4. 构造 Cerbos principal（JWT 角色 + 批内各资源适用的角色绑定并集）
     bound_roles: set[str] = set()
@@ -279,11 +277,10 @@ async def check_batch(
     # 5. 构建 Cerbos resources 数组
     cerbos_resources: list[dict] = []
     for item in body.items:
-        resource_attr = await get_resource_attr(
-            db, item.resource.type, item.resource.id, project_id,
+        resource_attr = await _build_resource(
+            db, principal, item.resource.type, item.resource.id,
+            (item.channel.kb if item.channel else None), project_id,
         )
-        if item.channel and item.channel.kb:
-            resource_attr["kb_id"] = item.channel.kb
 
         cerbos_resources.append({
             "actions": [item.action],
@@ -382,60 +379,34 @@ async def filter_items(
         ):
             pre_denied_ids.add(item.resource_id)
 
-    # 2. 查询 ACL — 构建 granted_actions dict
-    # Key: resource_id (for kb) or kb_id (for document, per Cerbos derived roles)
-    # Value: list of action suffixes like ["read", "write"]
+    # 2. ABAC 路：按 KB / 项目作用域聚合 granted_actions
+    # 此前这里把单篇文档的 doc:retrieve / doc:view 映射成该 KB 的 "read"，
+    # 一条文档级授权会放大成整个 KB 的检索可见性。现在文档级直授只走 ACL 路
+    # （resource.attr.acl，见 _build_resource），两路互不放大。
     cerbos_resources: list[dict] = []
     granted_actions: dict[str, list[str]] = {}
-    kb_read_principals: set[str] = set()  # track which KBs user has kb:read on
 
-    # First pass: collect KB-level permissions (kb:read → "read" on kb_id)
     for item in body.items:
-        kb_id = item.channel.kb
-        if kb_id not in kb_read_principals:
-            # Check if user has kb:read on this KB
-            kb_actions = await resolve_granted_actions_by_principal(
-                db, principal.principals, "kb:read",
-                "kb", kb_id, project_id=project_id,
-            )
-            # Also query doc:retrieve ACLs on specific docs (fine-grained access)
-            doc_actions = await resolve_granted_actions_by_principal(
-                db, principal.principals, "doc:retrieve",
-                item.resource_type, item.resource_id,
-                channel_kb=kb_id, project_id=project_id,
-            )
-            # Merge: kb:read → "read", doc:retrieve → "read" (both map to read on kb)
-            has_access = False
-            for p_actions in kb_actions.values():
-                for a in p_actions:
-                    if a.startswith("kb:"):
-                        suffix = a.split(":", 1)[-1]
-                        granted_actions.setdefault(kb_id, [])
-                        if suffix not in granted_actions[kb_id]:
-                            granted_actions[kb_id].append(suffix)
-                        has_access = True
-            for p_actions in doc_actions.values():
-                for a in p_actions:
-                    if a in ("doc:retrieve", "doc:view"):
-                        # Map document actions to kb-level "read"
-                        granted_actions.setdefault(kb_id, [])
-                        if "read" not in granted_actions[kb_id]:
-                            granted_actions[kb_id].append("read")
-                        has_access = True
-            if has_access:
-                kb_read_principals.add(kb_id)
+        item_granted = await resolve_granted_actions(
+            db, principal.principals, item.resource_type, item.resource_id,
+            channel_kb=item.channel.kb, project_id=project_id,
+        )
+        for key, actions in item_granted.items():
+            bucket = granted_actions.setdefault(key, [])
+            for action in actions:
+                if action not in bucket:
+                    bucket.append(action)
 
     # 需经 Cerbos 判定的项（排除已被型二封禁的资源）
-    cerbos_items: list[dict] = []
     cerbos_idx_map: list[int] = []  # cerbos_idx → original body.items idx
 
     for idx, item in enumerate(body.items):
         if item.resource_id in pre_denied_ids:
             continue  # 型二封禁 → 跳过 Cerbos 判定
-        resource_attr = await get_resource_attr(
-            db, item.resource_type, item.resource_id, project_id,
+        resource_attr = await _build_resource(
+            db, principal, item.resource_type, item.resource_id,
+            item.channel.kb, project_id,
         )
-        resource_attr["kb_id"] = item.channel.kb
         resource_attr["tenant_id"] = principal.tenant_id
 
         cerbos_resources.append({

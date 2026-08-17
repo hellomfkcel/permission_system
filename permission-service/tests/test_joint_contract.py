@@ -992,3 +992,55 @@ def test_J20_event_persistence_in_permission_changes(t: ContractTester):
             )
 
     t.retire("kb", kb_id)
+
+
+# ══════════════════════════════════════════════════════════════
+# J-21: 文档级 ACL 走 ACL 路精确生效，且不放大成 KB 级权限
+# 设计依据：docs/permission_model_v2.md §1 三种授权模式 / §4 判定路径唯一化
+# ══════════════════════════════════════════════════════════════
+
+def test_J21_document_acl_is_precise(t: ContractTester):
+    """J-21: 只授某文档 doc:view 的用户，能看该文档，但不获得 KB 级权限。
+
+    这条同时锁住两侧：
+    - 之前文档级 ACL 在 /v1/check 上完全不生效（被折进 granted_actions[kb_id]
+      后前缀被剥成 "view"，任何派生角色都匹配不上）→ 现在应 allow；
+    - 之前 /v1/filter 把文档级 doc:retrieve 映射成整个 KB 的 "read"，
+      一条文档授权放大成 KB 级检索可见性 → 现在同 KB 下的其他文档应 deny。
+    """
+    admin_jwt = t.login("admin", "system_admin")
+    alice_jwt = t.login("alice", "user")
+
+    kb_id = _unique_id("j21-kb")
+    granted_doc = _unique_id("j21-doc-ok")
+    other_doc = _unique_id("j21-doc-no")
+
+    t.register("kb", kb_id, "user:admin")
+    t.register("document", granted_doc, "user:admin")
+    t.register("document", other_doc, "user:admin")
+    t.link(granted_doc, kb_id)
+    t.link(other_doc, kb_id)
+
+    # 只对 granted_doc 授文档级 doc:view（不授任何 KB 级权限）
+    t.grant_acl(admin_jwt, "user:alice", "document", granted_doc, "doc:view")
+
+    allowed = t.check(alice_jwt, "doc:view", "document", granted_doc, channel_kb=kb_id)
+    assert allowed.get("decision") == "allow", (
+        f"J-21 FAIL: 文档级 ACL 未生效，doc:view 应 allow。got={allowed}"
+    )
+
+    # 同一 KB 下未授权的文档不应被放行 —— 授权不得从文档放大到 KB
+    denied = t.check(alice_jwt, "doc:view", "document", other_doc, channel_kb=kb_id)
+    assert denied.get("decision") == "deny", (
+        f"J-21 FAIL: 文档级授权被放大到 KB 级，其他文档也被放行。got={denied}"
+    )
+
+    # KB 本身同样不应可读
+    kb_denied = t.check(alice_jwt, "kb:read", "kb", kb_id)
+    assert kb_denied.get("decision") == "deny", (
+        f"J-21 FAIL: 文档级授权不应带来 kb:read。got={kb_denied}"
+    )
+
+    t.retire("document", granted_doc)
+    t.retire("document", other_doc)
+    t.retire("kb", kb_id)

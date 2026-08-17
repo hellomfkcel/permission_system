@@ -365,7 +365,7 @@ Cerbos 与权限服务挂载同一份 `./cerbos/policies`，两者对策略文�
 
 策略按项目分目录存放：`cerbos/policies/{project_id}/{derived_roles,resource_policies}/*.yaml`，历史版本归档在同项目下的 `.versions/`，文件名为时间戳加内容哈希。管理面提供读写、上传、校验、版本历史、版本 diff 与部署状态查询，灰度发布流程见 `docs/cerbos-policy-gray-release.md`。
 
-服务首次启动时会把旧的扁平目录（`policies/derived_roles`、`policies/resource_policies`）迁移到 `policies/rag-v14/` 下，`rag-v14` 目录已存在则跳过。
+`cerbos/policies/platform/` 是保留的平台层命名空间，只放 `platform.yaml`（功能模块入口）与 `project_permission.yaml`（项目权限数据操作），全局唯一、不随项目增减，对所有项目可见。项目目录里不得出现平台层资源，平台层也不 import 任何项目的派生角色 —— 这两条约定由 `tests/test_policy_conventions.py` 在 CI 中强制。完整模型见 `docs/permission_model_v2.md`。
 
 ## 6. 关键处理流程
 
@@ -779,7 +779,10 @@ docker-compose.keycloak.yml  Keycloak
 
 | 问题 | 处理 |
 |------|------|
-| 平台功能策略放在 `rag-v14` 目录且引用该项目的派生角色 | 移到策略根目录并改用自带的 `platform_roles` 派生角色，`kb_reader` 等不再被计入 `platform:read` / `platform:write` |
+| 平台功能策略放在 `rag-v14` 目录且引用该项目的派生角色 | 移到全局唯一的 `policies/platform/` 命名空间，只认 Keycloak 角色与平台授权记录，不 import 任何项目派生角色（见 `docs/permission_model_v2.md`） |
+| 平台功能准入在策略文件与 `auth_routes` 中各写一套 | 删除后端手写映射，统一由 Cerbos 判定（`services/platform_authorizer.py`），Cerbos 不可达时 fail-closed |
+| `role_definitions.permissions` 是策略文件的副本 | 删列（迁移 `f1a2b3c4d5e6`），角色权限只从 Cerbos 策略解析 |
+| `parentRoles` 被当作权限继承展示 | 取消 parentRoles 权限并集，管理台改称"激活角色"并标注激活方式 |
 | CSV 导入按 kb / doc 硬编码校验动作与资源类型 | 改为按目标项目的策略动态解析合法取值 |
 | 首次启动固定建档 `rag-v14` 并迁移策略目录 | 建档改为可配置（`BOOTSTRAP_*`）；策略目录迁移逻辑删除，该目录现用于承载平台级策略 |
 | `KEYCLOAK_REALM` 默认值为 `rag-v14` | 改为 `permission-platform`，既有部署通过环境变量保留原值 |

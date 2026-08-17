@@ -150,14 +150,29 @@ async def get_current_admin(
 async def require_platform_admin(
     admin: Principal = Depends(get_current_admin),
 ) -> Principal:
-    """依赖注入 — 仅 platform_admin 可通过。
+    """依赖注入 — 项目创建/删除等平台级写操作。
 
-    用于: 项目创建/删除等平台级操作。
+    判定同样交给 Cerbos：project_mgmt 模块上的 platform:write。
+    此前这里直接判断 `platform_admin in roles`，是绕过 platform.yaml 的
+    第三条判断路径 —— 被授予 project_mgmt 写权限的委托管理员会被它挡下，
+    而策略文件明明允许。
     """
-    if _PLATFORM_ADMIN_ROLE not in admin.roles:
+    from app.database import async_session
+    from services.platform_authorizer import PlatformAuthorizationUnavailable
+
+    async with async_session() as db:
+        try:
+            perms = await _get_platform_permissions(db, admin.user_id, admin.roles)
+        except PlatformAuthorizationUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Authorization service unavailable; request denied.",
+            ) from exc
+
+    if "platform:write" not in perms.get("project_mgmt", []):
         raise HTTPException(
             status_code=403,
-            detail="platform_admin role required for this operation.",
+            detail="Insufficient platform permission: platform:write on project_mgmt",
         )
     return admin
 
@@ -285,88 +300,16 @@ async def _get_platform_permissions(
     """查询当前管理员对平台功能的权限映射。
 
     返回 {feature_id: [actions]}，如 {"audit_mgmt": ["platform:read"]}。
+
+    唯一判定路径：结果全部来自 Cerbos 对 platform.yaml 的判定
+    （services/platform_authorizer.py）。此前这里手写了一份
+    "platform_admin → 全部 / platform_viewer → 全部只读 / platform_auditor →
+    三个模块" 的映射，与策略文件里的规则互为副本，改一处不改另一处就会
+    出现管理台放行而策略模拟器拒绝（或反之）的分叉。
     """
-    from app.platform_features import PLATFORM_FEATURES
+    from services.platform_authorizer import resolve_platform_permissions
 
-    permissions: dict[str, list[str]] = {}
-
-    # platform_admin JWT 角色 → 全部功能 + 全部权限
-    if _PLATFORM_ADMIN_ROLE in roles or "system_admin" in roles or "admin" in roles:
-        for fid in PLATFORM_FEATURES:
-            permissions[fid] = ["platform:read", "platform:write"]
-        return permissions
-
-    # 查询 platform 资源的 ACL
-    from sqlalchemy import or_
-    from models.acl import ACLEntry
-    principals_to_check = [f"user:{user_id}"]
-    if "system_admin" in roles:
-        principals_to_check.append("role:system_admin")
-    if "admin" in roles:
-        principals_to_check.append("role:admin")
-
-    acl_stmt = select(ACLEntry).where(
-        ACLEntry.resource_type == "platform",
-        ACLEntry.principal.in_(principals_to_check),
-        ACLEntry.revoked == False,  # noqa: E712
-    )
-    acl_result = await db.execute(acl_stmt)
-    for entry in acl_result.scalars():
-        if entry.resource_id not in permissions:
-            permissions[entry.resource_id] = []
-        if entry.action not in permissions[entry.resource_id]:
-            permissions[entry.resource_id].append(entry.action)
-
-    # 查询平台角色绑定（project_id IS NULL 的角色）
-    from models.role_binding import RoleBinding
-    rb_stmt = select(RoleBinding).where(
-        RoleBinding.principal.in_(principals_to_check),
-        RoleBinding.project_id.is_(None),
-        RoleBinding.revoked == False,  # noqa: E712
-    )
-    rb_result = await db.execute(rb_stmt)
-    platform_roles: set[str] = {rb.role for rb in rb_result.scalars()}
-
-    # platform_admin 角色绑定 → 全部权限
-    if "platform_admin" in platform_roles:
-        for fid in PLATFORM_FEATURES:
-            permissions[fid] = ["platform:read", "platform:write"]
-        return permissions
-
-    # platform_viewer → 全部功能的 platform:read
-    if "platform_viewer" in platform_roles:
-        for fid in PLATFORM_FEATURES:
-            if fid not in permissions:
-                permissions[fid] = []
-            if "platform:read" not in permissions[fid]:
-                permissions[fid].append("platform:read")
-
-    # platform_auditor → 仅审计日志和策略模拟的 platform:read
-    if "platform_auditor" in platform_roles:
-        for fid in ("audit_mgmt", "playground", "dashboard"):
-            if fid not in permissions:
-                permissions[fid] = []
-            if "platform:read" not in permissions[fid]:
-                permissions[fid].append("platform:read")
-
-    # 项目成员回退：在 project_members 表中但无平台角色 → 授予基本只读权限
-    # 注意：project_members.user_id 可能是 UUID，需要从 user_cache 反查
-    from models.project import ProjectMember
-    from models.user_cache import UserCache as _UC
-    is_member = await db.scalar(
-        select(ProjectMember.id).where(ProjectMember.user_id == user_id)
-    )
-    if not is_member:
-        uc_id = await db.scalar(select(_UC.user_id).where(_UC.username == user_id))
-        if uc_id:
-            is_member = await db.scalar(
-                select(ProjectMember.id).where(ProjectMember.user_id == uc_id)
-            )
-    if is_member and not permissions:
-        for fid in ("dashboard", "resource_mgmt", "user_mgmt", "role_mgmt"):
-            permissions[fid] = ["platform:read"]
-
-    return permissions
+    return await resolve_platform_permissions(db, user_id, roles)
 
 
 def require_platform_permission(feature_id: str, action: str = "platform:read"):
@@ -380,29 +323,36 @@ def require_platform_permission(feature_id: str, action: str = "platform:read"):
         ):
             ...
 
-    platform_admin/system_admin/admin JWT 角色 → 直接通过（不查 DB）。
-    其他管理员 → 查询 platform ACL 和平台角色绑定。
+    判定完全交给 Cerbos：角色能进哪些模块写在 platform.yaml 里，这里不做任何
+    角色名判断，也没有"管理员直接放行"的快捷分支 —— 那个分支正是第二条判断路径。
+    Cerbos 不可达时 fail-closed 返回 503，而不是回退到本地推断。
     """
     async def _check(
         admin: Principal = Depends(get_current_admin),
     ) -> None:
-        # 管理员角色直接通过（platform_admin, system_admin, admin）
-        if _ADMIN_ROLES.intersection(admin.roles) or _PLATFORM_ADMIN_ROLE in admin.roles:
-            return
-
-        # 查询平台权限
         from app.database import async_session
+        from services.platform_authorizer import PlatformAuthorizationUnavailable
+
         async with async_session() as db:
-            perms = await _get_platform_permissions(db, admin.user_id, admin.roles)
-            actions = perms.get(feature_id, [])
-            if action not in actions:
-                # platform:write 隐含 platform:read
-                if action == "platform:read" and "platform:write" in actions:
-                    return
+            try:
+                perms = await _get_platform_permissions(db, admin.user_id, admin.roles)
+            except PlatformAuthorizationUnavailable as exc:
                 raise HTTPException(
-                    status_code=403,
-                    detail=f"Insufficient platform permission: {action} on {feature_id}",
-                )
+                    status_code=503,
+                    detail="Authorization service unavailable; request denied.",
+                ) from exc
+
+        actions = perms.get(feature_id, [])
+        if action in actions:
+            return
+        # platform:write 隐含 platform:read（策略里两者分别授予，
+        # 此处只做包含关系的展开，不引入新的授权来源）
+        if action == "platform:read" and "platform:write" in actions:
+            return
+        raise HTTPException(
+            status_code=403,
+            detail=f"Insufficient platform permission: {action} on {feature_id}",
+        )
 
     return _check
 
@@ -430,11 +380,19 @@ async def get_my_platform_access(
     """
     from app.platform_features import PLATFORM_FEATURES
     from app.database import async_session
+    from services.platform_authorizer import PlatformAuthorizationUnavailable
 
     is_platform_admin = _is_platform_wide(admin.roles)
 
     async with async_session() as db:
-        perms = await _get_platform_permissions(db, admin.user_id, admin.roles)
+        try:
+            perms = await _get_platform_permissions(db, admin.user_id, admin.roles)
+        except PlatformAuthorizationUnavailable as exc:
+            # fail-closed：拿不到判定就不给任何功能，不回退到本地推断
+            raise HTTPException(
+                status_code=503,
+                detail="Authorization service unavailable; cannot resolve access.",
+            ) from exc
 
     # 项目列表
     project_ids_list: list[str] = []

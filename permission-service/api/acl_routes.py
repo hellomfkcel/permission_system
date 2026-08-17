@@ -303,6 +303,79 @@ async def list_acl(
     ]
 
 
+# ── 资源实例 ACL 投影 ──
+
+
+class ResourceACLOut(BaseModel):
+    """判定期注入 Cerbos 的 resource.attr.acl / role_acl 原样投影。"""
+    resource_type: str
+    resource_id: str
+    acl: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="用户级：{principal: [action, ...]}，principal 含 user:/group: 前缀",
+    )
+    role_acl: dict[str, list[str]] = Field(
+        default_factory=dict, description="角色级：{role: [action, ...]}",
+    )
+
+
+@router.get("/resources/{resource_type}/{resource_id}", response_model=ResourceACLOut)
+async def get_resource_acl_view(
+    resource_type: str,
+    resource_id: str,
+    project_id: str | None = Query(None, description="按项目 ID 过滤"),
+    db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("permission_mgmt", "platform:read")),
+) -> ResourceACLOut:
+    """查看某个资源实例上的 ACL —— 即 Cerbos 判定时看到的 acl / role_acl。
+
+    这是 acl_entries 的一个只读投影，不是另一份存储：写入仍走
+    POST /api/v1/acl/grant，撤销走 /revoke。同一事实只有一处出处，
+    因此这里显示的内容与判定期使用的内容不可能不一致。
+
+    与 GET /api/v1/acl?resource_id=... 的区别：那个返回授权记录的原始行，
+    这个按 Cerbos 的注入格式分组（用户级 / 角色级），用于排查"为什么这条
+    ACL 没生效"。
+    """
+    if project_id and not scope.can_access(project_id):
+        raise HTTPException(
+            status_code=403, detail=f"No access to project '{project_id}'"
+        )
+
+    now = datetime.now(timezone.utc)
+    conditions = [
+        ACLEntry.resource_type == resource_type,
+        ACLEntry.resource_id == resource_id,
+        ACLEntry.revoked == False,  # noqa: E712
+        or_(ACLEntry.expires_at.is_(None), ACLEntry.expires_at > now),
+    ]
+    if project_id:
+        conditions.append(ACLEntry.project_id == project_id)
+
+    result = await db.execute(
+        select(ACLEntry.principal, ACLEntry.action).where(*conditions)
+    )
+
+    acl: dict[str, list[str]] = {}
+    role_acl: dict[str, list[str]] = {}
+    for entry_principal, action in result.fetchall():
+        if entry_principal.startswith("role:"):
+            bucket = role_acl.setdefault(entry_principal.split(":", 1)[1], [])
+        else:
+            bucket = acl.setdefault(entry_principal, [])
+        if action not in bucket:
+            bucket.append(action)
+
+    return ResourceACLOut(
+        resource_type=resource_type,
+        resource_id=resource_id,
+        acl={k: sorted(v) for k, v in sorted(acl.items())},
+        role_acl={k: sorted(v) for k, v in sorted(role_acl.items())},
+    )
+
+
 # ── 有效权限计算 ──
 
 
