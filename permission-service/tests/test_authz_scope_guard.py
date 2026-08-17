@@ -43,6 +43,7 @@ ENFORCEMENT_MARKERS = {
     "_validate_grant_scope",
     "_audit_project_conditions",
     "require_project_member",
+    "require_project_admin",
     "require_platform_admin",
     "get_admin_project_ids",
     "filter_condition",

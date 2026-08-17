@@ -16,7 +16,13 @@ from sqlalchemy import select, func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from api.auth_routes import get_current_admin, require_project_member, require_platform_admin, require_platform_permission
+from api.auth_routes import (
+    get_current_admin,
+    require_project_admin,
+    require_project_member,
+    require_platform_admin,
+    require_platform_permission,
+)
 from schemas.responses import Principal
 from models.project import Project, ProjectClient, ProjectApiKey, ProjectAudience
 
@@ -224,9 +230,10 @@ async def add_project_client(
     project_id: str,
     body: CreateClientRequest,
     db: AsyncSession = Depends(get_db),
-    admin: Principal = Depends(require_platform_admin),
+    admin: Principal = Depends(get_current_admin),
+    _check: None = Depends(require_project_admin("project_id")),
 ) -> ProjectClientOut:
-    """为项目注册新的 client_id。需要 platform_admin（project_mgmt 平台专属）。"""
+    """为项目注册新的 client_id。需要本项目的 project_admin（或平台管理员）。"""
     existing = await db.scalar(
         select(ProjectClient).where(
             ProjectClient.project_id == project_id,
@@ -255,9 +262,10 @@ async def remove_project_client(
     project_id: str,
     client_id: str,
     db: AsyncSession = Depends(get_db),
-    admin: Principal = Depends(require_platform_admin),
+    admin: Principal = Depends(get_current_admin),
+    _check: None = Depends(require_project_admin("project_id")),
 ) -> None:
-    """删除项目的 client_id 注册。需要 platform_admin（project_mgmt 平台专属）。"""
+    """删除项目的 client_id 注册。需要本项目的 project_admin（或平台管理员）。"""
     pc = await db.scalar(
         select(ProjectClient).where(
             ProjectClient.project_id == project_id,
@@ -306,13 +314,14 @@ async def create_project_api_key(
     project_id: str,
     body: CreateApiKeyRequest,
     db: AsyncSession = Depends(get_db),
-    admin: Principal = Depends(require_platform_admin),
+    admin: Principal = Depends(get_current_admin),
+    _check: None = Depends(require_project_admin("project_id")),
 ) -> ProjectApiKeyCreated:
-    """为项目签发新的 API Key。需要 platform_admin（project_mgmt 平台专属）。
+    """为项目签发新的 API Key。需要本项目的 project_admin（或平台管理员）。
 
-    API Key 是 /v1 外部鉴权凭证，签发即等于放行以该项目身份调用判定链路，
-    因此归入平台级 provisioning，只有平台管理员可签发；项目成员不得自签，避免
-    项目管理员借此为其它项目铸造凭证造成跨项目越权。
+    API Key 是 /v1 外部鉴权凭证，签发即等于放行以该项目身份调用判定链路。范围严格收口
+    在路径里的 {project_id}：项目管理员只能给自己项目签发，只读成员不可、别项目的管理员
+    也不可，杜绝借此为其它项目铸造凭证造成跨项目越权。
 
     返回原始 key —— 仅此一次，之后不可获取。
     """
@@ -346,9 +355,10 @@ async def revoke_project_api_key(
     project_id: str,
     key_id: str,
     db: AsyncSession = Depends(get_db),
-    admin: Principal = Depends(require_platform_admin),
+    admin: Principal = Depends(get_current_admin),
+    _check: None = Depends(require_project_admin("project_id")),
 ) -> dict:
-    """吊销 API Key。需要 platform_admin（project_mgmt 平台专属）。"""
+    """吊销 API Key。需要本项目的 project_admin（或平台管理员）。"""
     try:
         kid = uuid.UUID(key_id)
     except ValueError:
@@ -399,9 +409,10 @@ async def add_project_audience(
     project_id: str,
     body: CreateAudienceRequest,
     db: AsyncSession = Depends(get_db),
-    admin: Principal = Depends(require_platform_admin),
+    admin: Principal = Depends(get_current_admin),
+    _check: None = Depends(require_project_admin("project_id")),
 ) -> ProjectAudienceOut:
-    """为项目注册新的 ctx_token audience。需要 platform_admin（project_mgmt 平台专属）。"""
+    """为项目注册新的 ctx_token audience。需要本项目的 project_admin（或平台管理员）。"""
     existing = await db.scalar(
         select(ProjectAudience).where(
             ProjectAudience.project_id == project_id,
@@ -487,9 +498,10 @@ async def remove_project_audience(
     project_id: str,
     audience: str,
     db: AsyncSession = Depends(get_db),
-    admin: Principal = Depends(require_platform_admin),
+    admin: Principal = Depends(get_current_admin),
+    _check: None = Depends(require_project_admin("project_id")),
 ) -> None:
-    """删除项目的 audience 注册。需要 platform_admin（project_mgmt 平台专属）。"""
+    """删除项目的 audience 注册。需要本项目的 project_admin（或平台管理员）。"""
     pa = await db.scalar(
         select(ProjectAudience).where(
             ProjectAudience.project_id == project_id,

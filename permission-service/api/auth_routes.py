@@ -217,6 +217,57 @@ def require_project_member(project_id_param: str = "project_id"):
     return _check  # 返回函数本身，让端点参数层的 Depends() 来包装
 
 
+def require_project_admin(project_id_param: str = "project_id"):
+    """FastAPI 依赖工厂 — 校验当前主体是该项目的项目管理员（或平台管理员）。
+
+    比 require_project_member 更严：不仅要在 project_members 里，角色还须为 project_admin。
+    用于项目自助 provisioning（本项目的 client / API Key / audience 增删）—— 项目管理员可管
+    自己项目，只读成员不可，别项目的管理员也不可（按路径里的 {project_id} 收口）。
+
+    平台级身份（system_admin / admin / platform_admin，见 _is_platform_wide）直接通过。
+    project_members.user_id 可能存用户名或 Keycloak UUID，两种都要匹配。
+    """
+    from fastapi import Request
+
+    async def _check(
+        request: Request,
+        admin: Principal = Depends(get_current_admin),
+    ) -> None:
+        if _is_platform_wide(admin.roles):
+            return
+
+        project_id_val = request.path_params.get(project_id_param, "")
+        if not project_id_val:
+            raise HTTPException(status_code=400, detail="Missing project_id")
+
+        from app.database import async_session
+        from sqlalchemy import select
+        from models.project import ProjectMember
+        from models.user_cache import UserCache
+
+        async with async_session() as db:
+            candidates = {admin.user_id}
+            alias = await db.scalar(
+                select(UserCache.user_id).where(UserCache.username == admin.user_id)
+            )
+            if alias:
+                candidates.add(alias)
+
+            role = await db.scalar(
+                select(ProjectMember.role).where(
+                    ProjectMember.project_id == project_id_val,
+                    ProjectMember.user_id.in_(candidates),
+                )
+            )
+            if role != "project_admin":
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Only a project_admin of '{project_id_val}' may perform this action.",
+                )
+
+    return _check
+
+
 class ProjectScope:
     """当前管理员的项目访问范围。
 
