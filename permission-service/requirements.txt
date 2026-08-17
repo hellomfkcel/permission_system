@@ -42,6 +42,10 @@ opentelemetry-sdk>=1.33.0
 opentelemetry-exporter-otlp-proto-http>=1.33.0
 opentelemetry-instrumentation-fastapi>=0.54b0
 opentelemetry-instrumentation-asgi>=0.54b0
+# 补全调用链 span（DB / Redis / 出站 HTTP）；observability.instrument_db_and_cache 按需启用
+opentelemetry-instrumentation-sqlalchemy>=0.54b0
+opentelemetry-instrumentation-redis>=0.54b0
+opentelemetry-instrumentation-httpx>=0.54b0
 
 # Langfuse 模型观测（fail-open，未配置密钥时跳过）
 langfuse>=2.0,<5.0

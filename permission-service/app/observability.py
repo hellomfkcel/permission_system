@@ -78,6 +78,31 @@ def get_tracer(name: str = "permission-service"):
     return trace.get_tracer(name)
 
 
+def current_trace_id() -> str | None:
+    """当前 span 的 trace_id（32 位 hex），无有效 span 时返回 None。
+
+    供请求中间件把 request_id 对齐到 trace_id（设计：request_id == trace_id），
+    实现 Grafana/Tempo ↔ Loki ↔ 审计日志互跳。
+    """
+    ctx = trace.get_current_span().get_span_context()
+    if ctx.is_valid:
+        return format(ctx.trace_id, "032x")
+    return None
+
+
+def add_otel_trace_context(logger, method_name, event_dict):
+    """structlog 处理器：把当前 OTel span 的 trace_id / span_id 注入每条日志。
+
+    这是 trace ↔ Loki 互跳的关键 —— 日志带上 trace_id 后，Grafana 才能从 Tempo
+    的一条 trace 跳到对应的 Loki 日志，或反向从日志跳回 trace。无有效 span 时不注入。
+    """
+    ctx = trace.get_current_span().get_span_context()
+    if ctx.is_valid:
+        event_dict["trace_id"] = format(ctx.trace_id, "032x")
+        event_dict["span_id"] = format(ctx.span_id, "016x")
+    return event_dict
+
+
 def instrument_fastapi(app):
     """对 FastAPI 应用进行自动埋点。
 
@@ -85,6 +110,40 @@ def instrument_fastapi(app):
     必须在 app 首次接收请求 scope 之前调用（参阅 RAG 系统 main.py 注释）。
     """
     FastAPIInstrumentor.instrument_app(app)
+
+
+def instrument_db_and_cache() -> None:
+    """对 DB / Redis / 出站 HTTP 埋点，补全调用链的 span 覆盖。
+
+    FastAPI 自动埋点只给到 HTTP 请求 span，Cerbos 调用有手动 span；但
+    resolve_granted_actions / get_resource_acl / check_subject_ban 等落到 Postgres
+    的查询、Redis 事件发布、出站 httpx 调用都不在 trace 里，导致排障时看不到
+    "请求 → DB → 判定 → 事件" 的完整链路。此处按需启用对应 instrumentor。
+
+    这些 instrumentor 属可选依赖（opentelemetry-instrumentation-{sqlalchemy,redis,
+    httpx}），未安装时静默跳过 —— 不阻断启动，装上即自动生效。
+    """
+    try:
+        from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+        from app.database import engine
+        SQLAlchemyInstrumentor().instrument(engine=engine.sync_engine)
+        _log.info("otel_sqlalchemy_instrumented")
+    except Exception as exc:
+        _log.info("otel_sqlalchemy_skipped", reason=str(exc)[:120])
+
+    try:
+        from opentelemetry.instrumentation.redis import RedisInstrumentor
+        RedisInstrumentor().instrument()
+        _log.info("otel_redis_instrumented")
+    except Exception as exc:
+        _log.info("otel_redis_skipped", reason=str(exc)[:120])
+
+    try:
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+        HTTPXClientInstrumentor().instrument()
+        _log.info("otel_httpx_instrumented")
+    except Exception as exc:
+        _log.info("otel_httpx_skipped", reason=str(exc)[:120])
 
 
 # Cerbos 调用的 span 由 services/cerbos_adapter.py 自行创建

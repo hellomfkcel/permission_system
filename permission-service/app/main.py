@@ -16,16 +16,32 @@ from app.limiter import limiter
 from app.client_validator import ClientIdValidationMiddleware
 
 # ── OTel Tracing（必须在 FastAPI app 创建前初始化）──
-from app.observability import init_tracing, instrument_fastapi, init_langfuse
+from app.observability import (
+    init_tracing, instrument_fastapi, instrument_db_and_cache,
+    init_langfuse, add_otel_trace_context,
+)
 init_tracing(_os.getenv("OTEL_SERVICE_NAME", "permission-service"))
 
 # ── 结构化日志 ──
+# 处理器链：合并 request 级 contextvars（request_id 等）→ 注入 OTel trace_id/span_id
+# → 时间戳/级别 → 渲染。trace_id 落到每条日志，是 trace ↔ Loki 互跳的前提。
+# LOG_FORMAT=json（或 PRODUCTION=true）时输出 JSON，方便 Loki/Promtail 解析字段；
+# 否则用彩色 Console 渲染，便于本地排障。
+_log_json = _os.getenv("LOG_FORMAT", "").lower() == "json" or (
+    _os.getenv("PRODUCTION", "").lower() == "true" and _os.getenv("LOG_FORMAT", "").lower() != "console"
+)
+_renderer = (
+    structlog.processors.JSONRenderer() if _log_json
+    else structlog.dev.ConsoleRenderer()
+)
 
 structlog.configure(
     processors=[
+        structlog.contextvars.merge_contextvars,
+        add_otel_trace_context,
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.add_log_level,
-        structlog.dev.ConsoleRenderer(),
+        _renderer,
     ],
     context_class=dict,
     logger_factory=structlog.PrintLoggerFactory(),
@@ -235,6 +251,9 @@ async def lifespan(application: FastAPI):
     # 策略角色对账：把落盘种子项目的角色补进 role_definitions 注册表
     await _reconcile_policy_roles()
 
+    # DB / Redis / 出站 HTTP 埋点：补全调用链 span（可选依赖，未装则静默跳过）
+    instrument_db_and_cache()
+
     logger.info("permission_service_starting",
                 host=settings.host, port=settings.port)
 
@@ -299,6 +318,42 @@ app.add_middleware(
 # X-Client-Id 准入矩阵强制校验
 # 必须在 CORS 之后、路由处理之前执行
 app.add_middleware(ClientIdValidationMiddleware)
+
+
+@app.middleware("http")
+async def correlation_middleware(request, call_next):
+    """请求级关联：绑定 request_id / trace_id 到日志 contextvars，并落一条结构化访问日志。
+
+    request_id 取值优先级：调用方 X-Request-Id → 当前 OTel trace_id（设计约定
+    request_id == trace_id，四方日志互跳）→ 兜底随机 UUID。绑定后，本请求内所有
+    结构化日志都自动带上 request_id/trace_id/path，排障时可从一条日志顺藤摸到整条链路。
+    """
+    import time as _time
+    import uuid as _uuid
+    from app.observability import current_trace_id
+
+    trace_id = current_trace_id()
+    request_id = request.headers.get("X-Request-Id") or trace_id or _uuid.uuid4().hex
+
+    bound = {"request_id": request_id, "path": request.url.path, "method": request.method}
+    if trace_id:
+        bound["trace_id"] = trace_id
+    structlog.contextvars.bind_contextvars(**bound)
+
+    start = _time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-Request-Id"] = request_id
+        return response
+    finally:
+        logger.info(
+            "http_request",
+            status=status_code,
+            duration_ms=round((_time.perf_counter() - start) * 1000, 2),
+        )
+        structlog.contextvars.clear_contextvars()
 
 
 # ── 健康检查 ──
