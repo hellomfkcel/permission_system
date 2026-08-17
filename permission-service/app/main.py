@@ -172,6 +172,44 @@ async def _bootstrap_default_project() -> None:
             logger.warning("bootstrap_project_failed", error=str(exc)[:200])
 
 
+async def _reconcile_policy_roles() -> None:
+    """启动时把各项目策略文件里的派生角色回填到 role_definitions 注册表。
+
+    role_definitions 只是"角色管理"页用的档案索引（名称/激活角色/归属/绑定计数），
+    权威仍在策略文件。原本只在策略写入/上传时同步（_sync_policy_roles_to_db），
+    于是"直接落盘种子"的项目（如 demo2 的 oa_roles.yaml）其角色在权限矩阵可见、
+    却缺席角色管理页 —— 两个视图分叉。此处在启动时对全部活跃项目做一次幂等对账，
+    消除该分叉。不写权限、不改策略，纯补档。
+    """
+    from sqlalchemy import select
+    from app.database import async_session
+    from models.project import Project
+
+    try:
+        async with async_session() as db:
+            rows = await db.execute(
+                select(Project.id).where(Project.status == "active")
+            )
+            project_ids = [r[0] for r in rows.fetchall()]
+    except Exception as exc:
+        logger.warning("policy_role_reconcile_list_failed", error=str(exc)[:200])
+        return
+
+    from api.audit_routes import _sync_policy_roles_to_db
+
+    total_created = 0
+    for pid in project_ids:
+        try:
+            res = await _sync_policy_roles_to_db(pid)
+            total_created += res.get("created", 0)
+        except Exception as exc:
+            logger.warning(
+                "policy_role_reconcile_failed", project=pid, error=str(exc)[:200]
+            )
+    if total_created:
+        logger.info("policy_role_reconcile_complete", created=total_created)
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """应用生命周期管理。
@@ -193,6 +231,9 @@ async def lifespan(application: FastAPI):
 
     # 首次启动引导：建立承载内置 client_id / audience / API Key 的项目
     await _bootstrap_default_project()
+
+    # 策略角色对账：把落盘种子项目的角色补进 role_definitions 注册表
+    await _reconcile_policy_roles()
 
     logger.info("permission_service_starting",
                 host=settings.host, port=settings.port)
