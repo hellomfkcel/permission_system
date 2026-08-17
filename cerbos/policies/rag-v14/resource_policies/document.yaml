@@ -1,3 +1,24 @@
+# ══════════════════════════════════════════════════════════════
+# Layer 3 · rag-v14 · 文档资源策略
+# ══════════════════════════════════════════════════════════════
+#
+# 动作权限矩阵（ABAC 路）：
+#   动作          kb_reader kb_writer kb_admin project_admin platform_admin_role
+#   doc:view          ✓        ✓        ✓          ✓             ✓
+#   doc:retrieve      ✓        ✓        ✓          ✓             ✓
+#   doc:download      ✗        ✓        ✓          ✓             ✓
+#   doc:unmount       ✗        ✓        ✓          ✓             ✓
+#   doc:purge         ✗        ✗        ✓          ✓             ✓
+#   doc:share         ✗        ✗        ✗          ✓             ✓
+#
+# ACL 路与 ABAC 路完全独立，任一命中即 ALLOW：
+#   resource.attr.acl      {"user:alice": ["doc:view", ...]}   用户级，文档实例级
+#   resource.attr.role_acl {"reviewer": ["doc:view", ...]}     角色级，文档实例级
+# 两者由后端从 resource_acl 表读出后注入，策略文件不含任何用户 ID 或角色名。
+#
+# 约定：
+#   ✓ 权限只授予 derivedRoles，身份角色（user / system_admin）不出现在授权规则；
+#   ✗ 无显式 DENY 规则，未命中即隐式拒绝。
 apiVersion: api.cerbos.dev/v1
 resourcePolicy:
   version: "default"
@@ -6,18 +27,34 @@ resourcePolicy:
     - rag_roles
 
   rules:
-    - actions: ["doc:view"]
+
+    # ══════════════════════════════════════════════════════
+    # ABAC 路 — 由 granted_actions 激活的派生角色
+    # ══════════════════════════════════════════════════════
+
+    - name: "view_retrieve"
+      actions: ["doc:view", "doc:retrieve"]
       effect: EFFECT_ALLOW
-      derivedRoles: ["kb_reader", "kb_writer", "kb_admin", "admin"]
+      derivedRoles:
+        - kb_reader
+        - kb_writer
+        - kb_admin
+        - project_admin
+        - platform_admin_role
       condition:
         match:
           expr: >
             request.resource.attr.is_enabled == true &&
             request.resource.attr.retired == false
 
-    - actions: ["doc:download"]
+    - name: "download"
+      actions: ["doc:download"]
       effect: EFFECT_ALLOW
-      derivedRoles: ["kb_reader", "kb_writer", "kb_admin", "admin"]
+      derivedRoles:
+        - kb_writer
+        - kb_admin
+        - project_admin
+        - platform_admin_role
       condition:
         match:
           expr: >
@@ -25,29 +62,162 @@ resourcePolicy:
             request.resource.attr.retired == false &&
             request.resource.attr.allow_download == true
 
-    - actions: ["doc:retrieve"]
+    - name: "unmount"
+      actions: ["doc:unmount"]
       effect: EFFECT_ALLOW
-      derivedRoles: ["kb_reader", "kb_writer", "kb_admin", "admin"]
-      condition:
-        match:
-          expr: >
-            request.resource.attr.is_enabled == true &&
-            request.resource.attr.retired == false
-
-    - actions: ["doc:unmount"]
-      effect: EFFECT_ALLOW
-      derivedRoles: ["kb_writer", "kb_admin", "admin"]
+      derivedRoles:
+        - kb_writer
+        - kb_admin
+        - project_admin
+        - platform_admin_role
       condition:
         match:
           expr: request.resource.attr.retired == false
 
-    - actions: ["doc:purge"]
+    - name: "purge"
+      actions: ["doc:purge"]
       effect: EFFECT_ALLOW
-      derivedRoles: ["kb_admin", "admin"]
+      derivedRoles:
+        - kb_admin
+        - project_admin
+        - platform_admin_role
       condition:
         match:
           expr: request.resource.attr.retired == false
 
-    - actions: ["doc:share"]
+    # 分享是跨 KB 操作，kb_admin 不可用，防止越 KB 权限扩散。
+    - name: "share"
+      actions: ["doc:share"]
       effect: EFFECT_ALLOW
-      derivedRoles: ["admin"]
+      derivedRoles:
+        - project_admin
+        - platform_admin_role
+      condition:
+        match:
+          expr: request.resource.attr.retired == false
+
+    # ══════════════════════════════════════════════════════
+    # ACL 路 — 资源实例级直授（用户级 / 角色级）
+    # ══════════════════════════════════════════════════════
+    #
+    # 每个动作一条规则：Cerbos 的条件表达式中没有「当前动作」变量，
+    # 动作名只能写死在规则里与 ACL 列表比对。
+    # 用户级与角色级合并为一条规则的 OR 条件，避免规则数量翻倍。
+
+    - name: "acl_view"
+      actions: ["doc:view"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["acl_user", "acl_role"]
+      condition:
+        match:
+          all:
+            of:
+              - expr: request.resource.attr.retired == false
+              - expr: >
+                  (has(request.resource.attr.acl) &&
+                   request.principal.id in request.resource.attr.acl &&
+                   request.resource.attr.acl[request.principal.id]
+                     .exists(x, x == "doc:view")) ||
+                  (has(request.resource.attr.role_acl) &&
+                   request.principal.roles.exists(r,
+                     r in request.resource.attr.role_acl &&
+                     request.resource.attr.role_acl[r].exists(x, x == "doc:view")))
+
+    - name: "acl_retrieve"
+      actions: ["doc:retrieve"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["acl_user", "acl_role"]
+      condition:
+        match:
+          all:
+            of:
+              - expr: request.resource.attr.retired == false
+              - expr: >
+                  (has(request.resource.attr.acl) &&
+                   request.principal.id in request.resource.attr.acl &&
+                   request.resource.attr.acl[request.principal.id]
+                     .exists(x, x == "doc:retrieve")) ||
+                  (has(request.resource.attr.role_acl) &&
+                   request.principal.roles.exists(r,
+                     r in request.resource.attr.role_acl &&
+                     request.resource.attr.role_acl[r].exists(x, x == "doc:retrieve")))
+
+    - name: "acl_download"
+      actions: ["doc:download"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["acl_user", "acl_role"]
+      condition:
+        match:
+          all:
+            of:
+              - expr: >
+                  request.resource.attr.retired == false &&
+                  request.resource.attr.allow_download == true
+              - expr: >
+                  (has(request.resource.attr.acl) &&
+                   request.principal.id in request.resource.attr.acl &&
+                   request.resource.attr.acl[request.principal.id]
+                     .exists(x, x == "doc:download")) ||
+                  (has(request.resource.attr.role_acl) &&
+                   request.principal.roles.exists(r,
+                     r in request.resource.attr.role_acl &&
+                     request.resource.attr.role_acl[r].exists(x, x == "doc:download")))
+
+    - name: "acl_unmount"
+      actions: ["doc:unmount"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["acl_user", "acl_role"]
+      condition:
+        match:
+          all:
+            of:
+              - expr: request.resource.attr.retired == false
+              - expr: >
+                  (has(request.resource.attr.acl) &&
+                   request.principal.id in request.resource.attr.acl &&
+                   request.resource.attr.acl[request.principal.id]
+                     .exists(x, x == "doc:unmount")) ||
+                  (has(request.resource.attr.role_acl) &&
+                   request.principal.roles.exists(r,
+                     r in request.resource.attr.role_acl &&
+                     request.resource.attr.role_acl[r].exists(x, x == "doc:unmount")))
+
+    - name: "acl_purge"
+      actions: ["doc:purge"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["acl_user", "acl_role"]
+      condition:
+        match:
+          all:
+            of:
+              - expr: request.resource.attr.retired == false
+              - expr: >
+                  (has(request.resource.attr.acl) &&
+                   request.principal.id in request.resource.attr.acl &&
+                   request.resource.attr.acl[request.principal.id]
+                     .exists(x, x == "doc:purge")) ||
+                  (has(request.resource.attr.role_acl) &&
+                   request.principal.roles.exists(r,
+                     r in request.resource.attr.role_acl &&
+                     request.resource.attr.role_acl[r].exists(x, x == "doc:purge")))
+
+    - name: "acl_share"
+      actions: ["doc:share"]
+      effect: EFFECT_ALLOW
+      derivedRoles: ["acl_user", "acl_role"]
+      condition:
+        match:
+          all:
+            of:
+              - expr: request.resource.attr.retired == false
+              - expr: >
+                  (has(request.resource.attr.acl) &&
+                   request.principal.id in request.resource.attr.acl &&
+                   request.resource.attr.acl[request.principal.id]
+                     .exists(x, x == "doc:share")) ||
+                  (has(request.resource.attr.role_acl) &&
+                   request.principal.roles.exists(r,
+                     r in request.resource.attr.role_acl &&
+                     request.resource.attr.role_acl[r].exists(x, x == "doc:share")))
+
+    # 其他情况：Cerbos 隐式拒绝。

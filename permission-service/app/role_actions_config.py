@@ -18,6 +18,21 @@
 PLATFORM_ACTIONS: set[str] = {"platform:read", "platform:write"}
 
 # ══════════════════════════════════════════════════════════════
+# 项目权限数据动作（Layer 2 · project_permission 资源）
+# ══════════════════════════════════════════════════════════════
+
+PROJECT_PERMISSION_ACTIONS: set[str] = {"permission:read", "permission:write"}
+
+# 项目权限数据类别，对应 project_permission.yaml 中的 resource.id
+PROJECT_PERMISSION_KINDS: dict[str, str] = {
+    "member_list": "项目成员列表",
+    "role_assignment": "成员角色分配",
+    "permission_matrix": "项目权限矩阵",
+    "role_definition": "项目内角色定义",
+    "grant_record": "授权记录",
+}
+
+# ══════════════════════════════════════════════════════════════
 # 项目资源动作（kb/document）
 # ══════════════════════════════════════════════════════════════
 
@@ -27,9 +42,13 @@ _KB_DOC_ACTIONS: set[str] = {
     "doc:purge", "doc:share",
 }
 
-VALID_ACTIONS: set[str] = _KB_DOC_ACTIONS | PLATFORM_ACTIONS
+VALID_ACTIONS: set[str] = (
+    _KB_DOC_ACTIONS | PLATFORM_ACTIONS | PROJECT_PERMISSION_ACTIONS
+)
 
-VALID_RESOURCE_TYPES: set[str] = {"kb", "document", "platform"}
+VALID_RESOURCE_TYPES: set[str] = {
+    "kb", "document", "platform", "project_permission",
+}
 
 # ══════════════════════════════════════════════════════════════
 # 资源类型 → 人类可读标签
@@ -39,6 +58,7 @@ RESOURCE_TYPE_LABELS: dict[str, str] = {
     "kb": "知识库",
     "document": "文档",
     "platform": "平台功能",
+    "project_permission": "项目权限数据",
 }
 
 # ══════════════════════════════════════════════════════════════
@@ -61,7 +81,7 @@ def _prefix_map(project_id: str | None = None) -> dict[str, str]:
 
     mapping: dict[str, str] = {}
     for resource_type in index.visible_resources(project_id):
-        for action in index.resource_actions[resource_type]:
+        for action in index.actions_for_resource(resource_type, project_id):
             if ":" not in action:
                 continue
             prefix = action.split(":")[0]

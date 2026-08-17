@@ -14,9 +14,12 @@ from app.database import Base
 
 
 class RoleDefinition(Base):
-    """角色定义 — 描述系统中的角色及其元数据。
+    """角色定义 — 角色元数据（不含权限）。
 
-    Cerbos YAML 为权限映射的权威源；此表为角色元数据的权威源。
+    职责边界：Cerbos YAML 是"角色能做什么"的唯一权威源；此表只记录角色的
+    档案信息（名称、描述、激活条件、项目归属、是否内置）。两侧无交集，
+    因此不存在需要手动同步的状态，也不可能出现权限展示与判定不一致。
+
     is_system=true 的角色不可删除（对应 Cerbos 中预定义的派生角色）。
     project_id=NULL 表示平台级角色（所有项目共享）。
     """
@@ -41,16 +44,17 @@ class RoleDefinition(Base):
     )
     parent_keycloak_roles: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=list,
-        comment='父级 Keycloak 角色: ["user"] 或 ["system_admin"]'
+        comment='激活该角色的身份角色（入场资格）: ["user"] 或 ["system_admin"]。'
+                "注意这是激活条件，不是权限继承 —— 角色的权限由 Cerbos 策略决定，"
+                "与父角色的权限无关。"
     )
     is_system: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False,
         comment="系统内置角色（不可删除）"
     )
-    permissions: Mapped[dict] = mapped_column(
-        JSONB, nullable=False, default=list,
-        comment="角色拥有的权限列表: [\"kb:read\", \"doc:view\", ...]"
-    )
+    # 权限列表刻意不在此表：角色能执行哪些动作属于"策略结构"，
+    # 唯一来源是 Cerbos YAML（services/cerbos_policy_parser.py 解析）。
+    # 迁移 f1a2b3c4d5e6 已删除原 permissions 列。
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

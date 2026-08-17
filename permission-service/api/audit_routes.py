@@ -173,14 +173,19 @@ async def simulate(
 ) -> SimulateResult:
     """策略模拟器 — 走真实 ACL + 角色绑定 + 封禁查询链路的权限判定。需要管理员认证。
 
-    与 /v1/check 使用相同的 resolve_granted_actions_by_principal +
-    check_subject_ban + get_resource_attr 链路，
+    与 /v1/check 使用完全相同的组装链路（resolve_granted_actions +
+    get_resource_acl + check_subject_ban + get_resource_attr），
     确保模拟结果反映实际权限数据，而非仅原始 Cerbos 策略。
+
+    修复：此前这里直接把 {principal: [actions]} 当作 granted_actions 传给
+    Cerbos —— 键是主体而不是资源作用域，派生角色永远匹配不上，
+    模拟结果与真实判定不一致。
     """
     from app.database import async_session
     from services.acl_resolver import (
-        resolve_granted_actions_by_principal,
+        resolve_granted_actions,
         check_subject_ban,
+        get_resource_acl,
         get_resource_attr,
     )
 
@@ -209,11 +214,12 @@ async def simulate(
         roles = ["user"]
         tenant_id = "tenant-dev"
 
-    # ── 查询真实 ACL + 角色绑定 → granted_actions ──
+    # ── 查询真实授权记录 → granted_actions（ABAC）+ acl / role_acl（ACL）──
+    channel_kb = resource_attr.get("kb_id")
     async with async_session() as db:
-        granted_actions = await resolve_granted_actions_by_principal(
-            db, list(principals), body.action,
-            resource_kind, resource_id, project_id=body.project_id,
+        granted_actions = await resolve_granted_actions(
+            db, list(principals), resource_kind, resource_id,
+            channel_kb=channel_kb, project_id=body.project_id,
         )
 
         # 查询型一封禁
@@ -225,6 +231,14 @@ async def simulate(
         res_attr = await get_resource_attr(
             db, resource_kind, resource_id, body.project_id,
         )
+        acl, role_acl = await get_resource_acl(
+            db, resource_kind, resource_id,
+            principals=list(principals),
+            principal_id=f"user:{user_id}",
+            project_id=body.project_id,
+        )
+        res_attr["acl"] = acl
+        res_attr["role_acl"] = role_acl
         # 合并用户提供的 attr（用户输入覆盖 DB 查询）
         merged_attr = {**res_attr, **resource_attr}
 
@@ -507,14 +521,22 @@ def _validate_policy_yaml(yaml_content: str) -> tuple[bool, str]:
 
 
 async def _sync_policy_roles_to_db(project_id: str) -> dict[str, int]:
-    """策略文件写入后，从 Cerbos YAML 解析角色并同步到 role_definitions 表。
+    """策略文件写入后，把新出现的角色**建档**到 role_definitions 表。
+
+    只同步档案信息（名称、激活角色、项目归属），**不写权限** ——
+    角色能执行哪些动作由策略文件回答，表里没有对应的列可写
+    （迁移 f1a2b3c4d5e6 已删除）。同步的目的只是让新角色在管理台可见、
+    可写描述、可统计绑定数。
 
     Returns:
         {"created": N, "updated": N}
     """
     from app.database import async_session
     from sqlalchemy import select
-    from services.cerbos_policy_parser import parse_permissions_matrix as _parse_matrix
+    from services.cerbos_policy_parser import (
+        PLATFORM_NAMESPACE,
+        parse_permissions_matrix as _parse_matrix,
+    )
 
     created = 0
     updated = 0
@@ -533,31 +555,34 @@ async def _sync_policy_roles_to_db(project_id: str) -> dict[str, int]:
             name = role_info.get("name", "")
             if not name:
                 continue
-            source = role_info.get("source", "")
-            # 仅同步 Cerbos 派生角色（跳过 keycloak 身份角色如 user/system_admin）
-            if source != "cerbos":
+            # 仅同步 Cerbos 派生角色（跳过 user/system_admin 等身份角色，
+            # 它们的档案由 Keycloak / 平台种子数据维护）
+            if role_info.get("kind") != "derived":
                 continue
 
-            parent_roles = role_info.get("parent_keycloak_roles", [])
-            permissions = role_info.get("permissions", [])
-            role_project_id = role_info.get("project_id") or project_id
+            parent_roles = role_info.get("activated_by", [])
+            # 平台层命名空间（"platform"）与无归属（""）的角色不属于任何项目
+            parsed_project = role_info.get("project_id") or ""
+            role_project_id = (
+                None
+                if parsed_project in ("", PLATFORM_NAMESPACE)
+                else parsed_project
+            )
 
             existing = await db.scalar(
                 select(RoleDefinition).where(RoleDefinition.name == name)
             )
 
             if existing:
-                existing.permissions = permissions
                 existing.parent_keycloak_roles = parent_roles
                 existing.project_id = role_project_id
                 updated += 1
             else:
                 new_role = RoleDefinition(
                     name=name,
-                    description="Cerbos 派生角色（由策略文件自动同步）",
+                    description="Cerbos 派生角色（由策略文件自动建档）",
                     parent_keycloak_roles=parent_roles,
                     is_system=True,
-                    permissions=permissions,
                     project_id=role_project_id,
                 )
                 db.add(new_role)

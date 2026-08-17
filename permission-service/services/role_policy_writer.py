@@ -90,7 +90,7 @@ def resolve_resource_types(
         owners = [
             resource_type
             for resource_type in visible
-            if action in index.resource_actions[resource_type]
+            if action in index.actions_for_resource(resource_type, project_id)
         ]
         if not owners:
             unmapped.append(action)
