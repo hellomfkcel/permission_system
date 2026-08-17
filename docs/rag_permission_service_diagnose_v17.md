@@ -3,7 +3,7 @@
 > 测试日期：2026-08-17
 > 环境：真实全栈（PostgreSQL + Redis + Cerbos PDP + FastAPI service），不 mock、不硬编码、
 > 不为跑通绕过架构。所有判定都走真实链路（Cerbos 判定 + DB 授权数据 + 中间件准入）。
-> 承接 v16（G1–G4 修复）。本轮在联调中新发现并修复两处越权缺陷 **G5 / G6**。
+> 承接 v16（G1–G4 修复）。本轮在联调中新发现并修复三处越权缺陷 **G5 / G6 / G7**。
 
 ## 一、测试环境与夹具
 
@@ -233,6 +233,7 @@ check_subject_ban + Cerbos），非读原始 YAML。经 G5 收口后按项目隔
 | G5 | `api/acl_routes.py` | list_acl 补校验 |
 | G5 | `api/audit_routes.py` | list_audit、simulate 补校验 |
 | G6 | `api/acl_routes.py` | `_validate_grant_scope` 平台层分支加 `is_platform_admin` 校验 |
+| G7 | `api/audit_routes.py` | 事件重放按项目范围收口；抽出 `_audit_project_conditions` 共享给审计查询 |
 
 ### 7.2 回归确认
 
@@ -268,13 +269,66 @@ GET /roles/permissions（不传 pid）     200    400     403      400
 五个测试场景全部通过。系统满足：单一数据源三层授权、项目严格隔离、无跨项目/平台数据
 泄漏、各身份无越权路径、/api 与 /v1 双通道及外部系统鉴权正常。
 
-本轮联调新暴露并修复两处越权缺陷：**G5**（读端点显式 project_id 缺范围校验，导致跨项目
-读取泄漏）与 **G6**（平台层 ACL grant 未校验平台管理员，导致项目管理员可自授平台权限、
-完全越权到租户/项目管理）。两者均属"模块级准入通过、但项目级/层级校验缺失"的同一类
-问题，修复后判定链路在模块准入之外补齐了项目范围与层级两道关口。
+本轮联调新暴露并修复三处越权缺陷：**G5**（读端点显式 project_id 缺范围校验，导致跨项目
+读取泄漏）、**G6**（平台层 ACL grant 未校验平台管理员，导致项目管理员可自授平台权限、
+完全越权到租户/项目管理）、**G7**（事件重放缺项目范围收口）。三者均属"模块级准入通过、
+但项目级/层级校验缺失"的同一类问题，修复后判定链路在模块准入之外补齐了项目范围与层级
+两道关口。
 
-### 遗留观察（非本轮阻断项）
+---
 
-`POST /v1/events/replay`（audit_mgmt:write）按全局版本号重放事件、不带 project_id，
-dry_run 会返回跨项目事件摘要。项目管理员持有 audit_mgmt:write 即可触发。因 replay 语义
-本身是平台级事件流恢复工具，为其加项目范围属更大的设计取舍，记录待定，未在本轮改动。
+## 九、追加排查 —— G7 事件重放（/v1/events/replay）跨项目问题
+
+v17 初版把重放列为"遗留观察待定"，本节承接排查并完成修复。
+
+### 9.1 缺陷确认（真实栈复现）
+
+`POST /api/v1/events/replay`（audit_mgmt:write）按**全局版本号**重放 `permission_changes`，
+原实现对事件流无任何项目过滤。两条泄漏路径：
+
+- **读**（dry_run，默认）：响应回带 `change_detail`（含 principal、resource、project_id）。
+  播种一条 demo2 的 `RESTRICTION_ADDED`（principal=user:mallory）后，palice（rag-v14
+  管理员）`replay from_version=1` 实测能看到该 demo2 事件：
+
+  ```
+  total: 11 | by project: {'rag-v14': 4, 'demo2': 1, None: 4, '<none>': 2}
+  demo2 events VISIBLE to palice: 1  (v11 RESTRICTION_ADDED principal=user:mallory)
+  ```
+
+- **写**（dry_run=false）：把匹配到的事件重新打进共享的 Redis `visibility_changed`
+  频道。项目管理员据此可republish其它项目的事件，波及别项目的 RAG 订阅方。
+
+根因与 G5 同类：`require_platform_permission("audit_mgmt","write")` 只校验模块准入，
+项目管理员均持有该权限；重放端点未叠加项目范围过滤。
+
+### 9.2 修复
+
+project_id 存于 `change_detail` JSONB（与审计查询同源）。抽出共享条件构造器
+`_audit_project_conditions(scope, project_id)`，统一三段范围语义并加固空项目集：
+
+- 显式 project_id → `assert_project_scope` 校验后按该项目过滤；
+- 平台管理员不传 → 不过滤（全部项目）；
+- 非平台管理员不传 → 限定到自己的项目集合；无项目归属返回 `false()`（一条不可见）。
+
+未带 project_id 的事件（平台层 / 早期未归档）对非平台管理员一律不可见。审计查询
+`list_audit_entries` 与重放 `replay_events` 共用该构造器（顺带修掉审计查询里
+空项目集会漏过滤的隐患）。重放请求体新增可选 `project_id`。
+
+重放语义仍是项目内 补消费（RAG 侧订阅断开后按本项目版本流补发），只是范围收口到
+调用者的项目——不改为平台专属，与"audit_mgmt 是项目模块"的定位一致。
+
+### 9.3 修复后复测
+
+| 主体 | 用例 | 实测 |
+| --- | --- | --- |
+| palice | replay dry_run（不传 pid）| 仅 rag-v14 4 条，**无 demo2/未归属事件** |
+| palice | replay dry_run=false（真实 republish）| replayed=4，全部 rag-v14 |
+| palice | replay 显式 project_id=demo2 | **403** |
+| bob | replay dry_run | 仅 demo2 1 条 |
+| pviewer | replay（无 audit_mgmt:write）| **403** |
+| admin | replay dry_run | 全部 11 条（含 demo2 + 未归属）|
+| admin | replay 显式 project_id=demo2 | 仅 demo2 1 条 |
+
+回归：审计查询 `GET /audit` 经共享构造器重构后范围不变（palice 仅 rag-v14、bob 仅
+demo2、admin 全量、palice 显式 demo2→403）。`py_compile` 通过；测试播种数据经真实 API
+清理。**G7 修复完成，重放不再存在跨项目问题。**
