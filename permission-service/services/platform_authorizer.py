@@ -51,15 +51,22 @@ async def _platform_role_bindings(
     return {row[0] for row in result.fetchall() if row[0]}
 
 
-async def _project_member_roles(db: AsyncSession, user_id: str) -> set[str]:
+async def _project_member_roles(
+    db: AsyncSession, user_id: str, scope_project_id: str | None = None,
+) -> set[str]:
     """项目成员 → 合成平台角色（区分管理员与只读成员）。
 
     project_members.role → 合成角色（"成员能进哪些模块"的规则写在 platform.yaml）：
         project_admin  → "project_admin"   （项目 7 模块读写）
         project_viewer → "project_member"   （只读子集）
 
-    取全部 membership 的并集：模块准入表达的是"能进这类模块"，具体操作哪个项目
-    由数据层按 project_id 过滤，因此在任一项目是管理员即获得管理员的模块准入。
+    scope_project_id 为 None（如侧边栏 me/access）：取全部 membership 的并集，回答
+    "这个人在整个平台能看到哪些模块"。
+
+    scope_project_id 指定（判定某个具体项目上的请求）：只按该项目的成员角色解析。
+    这一步是跨项目角色隔离的关键 —— 否则"在 A 项目是管理员、在 B 项目只是查看者"
+    的人会带着管理员的模块准入去操作 B 项目（合成角色并集 + 数据层只查成员资格，
+    两道合起来仍挡不住按角色降级）。
 
     project_members.user_id 可能存用户名，也可能存 Keycloak UUID，两种都要匹配。
     """
@@ -73,9 +80,11 @@ async def _project_member_roles(db: AsyncSession, user_id: str) -> set[str]:
     if alias:
         candidates.add(alias)
 
-    result = await db.execute(
-        select(ProjectMember.role).where(ProjectMember.user_id.in_(candidates))
-    )
+    conditions = [ProjectMember.user_id.in_(candidates)]
+    if scope_project_id is not None:
+        conditions.append(ProjectMember.project_id == scope_project_id)
+
+    result = await db.execute(select(ProjectMember.role).where(*conditions))
     synthetic: set[str] = set()
     for (role,) in result.fetchall():
         synthetic.add("project_admin" if role == "project_admin" else "project_member")
@@ -116,10 +125,15 @@ async def _platform_feature_grants(
 
 async def resolve_platform_permissions(
     db: AsyncSession, user_id: str, jwt_roles: list[str],
+    scope_project_id: str | None = None,
 ) -> dict[str, list[str]]:
     """返回当前主体对全部平台功能的权限映射 {feature_id: [actions]}。
 
     单次 Cerbos 批量判定覆盖 12 个功能 × 2 个动作。
+
+    scope_project_id 为 None：按全部 membership 并集解析（侧边栏 me/access 用）。
+    scope_project_id 指定：项目成员角色只按该项目解析，实现跨项目按角色降级
+    （见 _project_member_roles）。平台级身份（jwt/绑定角色）与平台 ACL 委托不受影响。
 
     Raises:
         PlatformAuthorizationUnavailable: Cerbos 调用失败。
@@ -128,7 +142,7 @@ async def resolve_platform_permissions(
 
     principals = _principals_of(user_id)
     bound_roles = await _platform_role_bindings(db, principals)
-    member_roles = await _project_member_roles(db, user_id)
+    member_roles = await _project_member_roles(db, user_id, scope_project_id)
     granted_actions = await _platform_feature_grants(db, principals)
 
     cerbos_principal = {

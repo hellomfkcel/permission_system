@@ -354,6 +354,7 @@ def assert_project_scope(scope: ProjectScope, project_id: str | None) -> None:
 
 async def _get_platform_permissions(
     db: AsyncSession, user_id: str, roles: list[str],
+    scope_project_id: str | None = None,
 ) -> dict[str, list[str]]:
     """查询当前管理员对平台功能的权限映射。
 
@@ -361,10 +362,39 @@ async def _get_platform_permissions(
 
     唯一判定路径：结果全部来自 Cerbos 对 platform.yaml 的判定
     （services/platform_authorizer.py），本函数不做任何角色名判断。
+
+    scope_project_id 指定时，项目成员角色只按该项目解析（跨项目按角色降级）。
     """
     from services.platform_authorizer import resolve_platform_permissions
 
-    return await resolve_platform_permissions(db, user_id, roles)
+    return await resolve_platform_permissions(db, user_id, roles, scope_project_id)
+
+
+async def _target_project_id(request: "Request") -> str | None:
+    """取本次请求要操作的项目 ID：优先 query，其次 JSON / 表单 body。
+
+    用于把模块准入判定收口到"这个请求针对的那个项目"上——否则模块准入用的是
+    跨项目角色并集，"在别的项目是管理员"会漏进来（G9）。body 读取依赖 Starlette
+    对已读 body/form 的缓存，处理函数随后仍能正常解析同一份 body。
+    """
+    pid = request.query_params.get("project_id")
+    if pid:
+        return pid
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        ctype = request.headers.get("content-type", "")
+        try:
+            if "application/json" in ctype:
+                body = await request.json()
+                if isinstance(body, dict):
+                    val = body.get("project_id")
+                    return val if isinstance(val, str) and val else None
+            elif "form-data" in ctype or "x-www-form-urlencoded" in ctype:
+                form = await request.form()
+                val = form.get("project_id")
+                return val if isinstance(val, str) and val else None
+        except Exception:
+            return None
+    return None
 
 
 def require_platform_permission(feature_id: str, action: str = "platform:read"):
@@ -382,15 +412,22 @@ def require_platform_permission(feature_id: str, action: str = "platform:read"):
     角色名判断，也不设"管理员直接放行"的快捷分支。
     Cerbos 不可达时 fail-closed 返回 503，不回退到本地推断。
     """
+    from fastapi import Request
+
     async def _check(
+        request: Request,
         admin: Principal = Depends(get_current_admin),
     ) -> None:
         from app.database import async_session
         from services.platform_authorizer import PlatformAuthorizationUnavailable
 
+        scope_project_id = await _target_project_id(request)
+
         async with async_session() as db:
             try:
-                perms = await _get_platform_permissions(db, admin.user_id, admin.roles)
+                perms = await _get_platform_permissions(
+                    db, admin.user_id, admin.roles, scope_project_id,
+                )
             except PlatformAuthorizationUnavailable as exc:
                 raise HTTPException(
                     status_code=503,
