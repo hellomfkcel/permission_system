@@ -438,13 +438,15 @@ async def get_active_kbs_for_principal(
 
     if doc_ids:
         from models.mount import MountRegistry as MountModel
+        mount_conditions = [
+            MountModel.doc_id.in_(doc_ids),
+            MountModel.unlinked == False,  # noqa: E712
+        ]
+        # 挂载关系按项目隔离：不加此条件，doc→kb 反查会把别的项目的 kb_id
+        # 带进 prefilter 结果。
+        _scoped(mount_conditions, MountModel, project_id)
         mount_result = await db.execute(
-            select(MountModel.kb_id)
-            .where(
-                MountModel.doc_id.in_(doc_ids),
-                MountModel.unlinked == False,  # noqa: E712
-            )
-            .distinct()
+            select(MountModel.kb_id).where(*mount_conditions).distinct()
         )
         for row in mount_result.fetchall():
             if row[0] not in kb_ids:

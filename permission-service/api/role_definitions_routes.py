@@ -88,7 +88,12 @@ class CreateRoleRequest(BaseModel):
     permissions: list[str] = Field(
         default=[], description="角色权限列表，取值须已在目标项目的资源策略中声明"
     )
-    project_id: str | None = Field(None, description="所属项目 ID（NULL=平台级角色）")
+    project_id: str = Field(
+        ...,
+        min_length=1,
+        description="所属项目 ID。自定义角色必须归属某个项目：平台层按设计只有两个"
+                    "策略文件、不随项目增减，没有平台级自定义派生角色这一形态。",
+    )
 
 
 class UpdateRoleRequest(BaseModel):
@@ -146,15 +151,33 @@ def _to_out(
     )
 
 
-async def _binding_counts(db: AsyncSession, names: list[str]) -> dict[str, int]:
+async def _binding_counts(
+    db: AsyncSession, names: list[str], project_id: str | None,
+) -> dict[str, int]:
+    """角色的活跃绑定数。
+
+    按项目统计：角色名在 role_definitions 里是项目内唯一（uq_role_def_project_name），
+    两个项目可以有同名角色。不带项目条件会把两边的绑定加在一起，两张角色卡显示
+    同一个被放大的数字。平台级绑定（project_id IS NULL）对所有项目生效，一并计入。
+    """
     if not names:
         return {}
+    from sqlalchemy import or_
+
+    conditions = [
+        RoleBinding.role.in_(names),
+        RoleBinding.revoked == False,  # noqa: E712
+    ]
+    if project_id:
+        conditions.append(
+            or_(
+                RoleBinding.project_id == project_id,
+                RoleBinding.project_id.is_(None),
+            )
+        )
     stmt = (
         select(RoleBinding.role, sa_func.count().label("cnt"))
-        .where(
-            RoleBinding.role.in_(names),
-            RoleBinding.revoked == False,  # noqa: E712
-        )
+        .where(*conditions)
         .group_by(RoleBinding.role)
     )
     result = await db.execute(stmt)
@@ -200,7 +223,7 @@ async def list_role_definitions(
     result = await db.execute(stmt.order_by(RoleDefinition.name))
     roles = result.scalars().all()
 
-    counts = await _binding_counts(db, [r.name for r in roles])
+    counts = await _binding_counts(db, [r.name for r in roles], project_id)
 
     # 权限按查询作用域解析：项目模式下平台级角色只显示该项目内的动作。
     return [_to_out(r, counts.get(r.name, 0), project_id) for r in roles]
@@ -227,8 +250,8 @@ async def get_role_definition(
     if r is None:
         raise HTTPException(status_code=404, detail=f"Role not found: {name}")
 
-    counts = await _binding_counts(db, [name])
     scope = project_id or r.project_id
+    counts = await _binding_counts(db, [name], scope)
     return RoleDetailOut(**_to_out(r, counts.get(name, 0), scope).model_dump())
 
 
@@ -240,25 +263,33 @@ async def create_role_definition(
     scope: ProjectScope = Depends(get_project_scope),
     _perm: None = Depends(require_platform_permission("role_mgmt", "platform:write")),
 ) -> RoleDefOut:
-    """创建自定义角色。
+    """创建自定义角色（项目级）。
 
     先写 Cerbos 策略文件再提交数据库；数据库提交失败时回滚文件，
     避免出现表中有角色而策略中没有的分叉状态。
 
-    project_id=NULL → 平台级角色（写入策略根目录，全部项目可见）
-    project_id 指定 → 项目级角色（写入该项目的策略目录）
+    角色写入该项目的策略目录，派生角色集合名带项目前缀，动作取值只能是该项目
+    自有资源策略中已声明的动作 —— 平台层资源（platform / project_permission）
+    不可作为目标，见 services/role_policy_writer 的说明。
     """
-    if body.project_id and not scope.can_access(body.project_id):
+    if not scope.can_access(body.project_id):
         raise HTTPException(
             status_code=403, detail=f"No access to project '{body.project_id}'"
+        )
+
+    from models.project import Project
+    project_exists = await db.scalar(
+        select(Project.id).where(Project.id == body.project_id)
+    )
+    if not project_exists:
+        raise HTTPException(
+            status_code=404, detail=f"Project '{body.project_id}' not found"
         )
 
     existing = await db.scalar(
         select(RoleDefinition).where(
             RoleDefinition.name == body.name,
-            RoleDefinition.project_id.is_(None)
-            if body.project_id is None
-            else RoleDefinition.project_id == body.project_id,
+            RoleDefinition.project_id == body.project_id,
         )
     )
     if existing:
@@ -362,7 +393,7 @@ async def update_role_definition(
         ) from exc
 
     invalidate_role_actions_cache()
-    counts = await _binding_counts(db, [name])
+    counts = await _binding_counts(db, [name], r.project_id)
     return _to_out(r, counts.get(name, 0), r.project_id)
 
 
@@ -391,7 +422,7 @@ async def delete_role_definition(
             status_code=403, detail=f"No access to project '{r.project_id}'"
         )
 
-    counts = await _binding_counts(db, [name])
+    counts = await _binding_counts(db, [name], r.project_id)
     if counts.get(name, 0) > 0:
         raise HTTPException(
             status_code=409,

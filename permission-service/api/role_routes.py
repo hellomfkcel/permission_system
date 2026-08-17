@@ -111,6 +111,7 @@ async def bind_role(
         tenant_id=body.tenant_id,
         resource_type=body.resource_type or "kb",
         resource_id=body.resource_id or "",
+        project_id=body.project_id,
         event_type="ROLE_BOUND",
         change_detail={
             "action": "role_bound",
@@ -185,6 +186,7 @@ async def unbind_role(
         tenant_id=binding.tenant_id,
         resource_type=binding.resource_type or "kb",
         resource_id=binding.resource_id or "",
+        project_id=binding.project_id,
         event_type="ROLE_UNBOUND",
         change_detail={
             "action": "role_unbound",

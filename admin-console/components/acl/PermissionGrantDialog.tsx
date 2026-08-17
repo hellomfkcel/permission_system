@@ -36,7 +36,16 @@ const RESOURCE_TYPE_LABELS_FALLBACK: Record<string, string> = {
   kb: "📚 知识库",
   document: "📄 文档",
   platform: "🔧 平台功能",
+  project_permission: "🗂 项目权限数据",
 };
+
+/** 平台层资源类型 —— 与 cerbos/policies/platform/resource_policies/ 下的策略对应。
+ *
+ * 这两类资源的授权是平台级的（不带 project_id）。后端以策略文件所在的命名空间为准
+ * 做最终校验（acl_routes._validate_grant_scope），前端这份只用于决定表单是否要求
+ * 选择项目 —— 判断错了会被后端 422 挡下，不会写出层级错位的记录。
+ */
+const PLATFORM_LAYER_RESOURCES = new Set(["platform", "project_permission"]);
 
 interface PermissionGrantDialogProps {
   open: boolean;
@@ -261,10 +270,21 @@ export default function PermissionGrantDialog({
     if (!resourceId.trim()) return showToast("error", "请选择资源");
     if (selectedActions.length === 0) return showToast("error", "请至少选择一个权限");
 
+    // 授权记录的项目归属必须与资源所在的层对齐（docs/permission_model_v2.md §1）：
+    // 平台层资源（platform / project_permission）的授权是平台级的，不带 project_id；
+    // 项目层资源必须带当前项目。此前这里对项目 ID 有一个写死的兜底值，
+    // 平台功能的授权因此被挂到了那个项目名下，后端会把它当成平台级授权读出来。
+    const isPlatformLayer = PLATFORM_LAYER_RESOURCES.has(resourceType);
+    const activeProject =
+      currentProjectId && currentProjectId !== "__all__" ? currentProjectId : null;
+    if (!isPlatformLayer && !activeProject) {
+      return showToast("error", "请先在顶部切换到目标项目，再授予项目级权限");
+    }
+    const pid = isPlatformLayer ? null : activeProject;
+
     setSubmitting(true);
     const tenantId = user?.tenant_id || "tenant-dev";
     const grantedBy = principal.startsWith("user:") ? principal : `user:${user?.user_id || "admin"}`;
-    const pid = currentProjectId && currentProjectId !== "__all__" ? currentProjectId : "rag-v14";
 
     try {
       if (selectedActions.length === 1) {

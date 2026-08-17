@@ -95,6 +95,11 @@ async def _platform_feature_grants(
     """platform 资源的 ACL → {feature_id: [platform:read, ...]}。
 
     与 Cerbos 中 granted_actions 的取键方式一致（键即 resource.id）。
+
+    只认平台级授权（project_id IS NULL）：platform 是平台层资源，它的授权不属于
+    任何项目。若把挂在某个项目下的 platform 授权也读进来，项目级的写权限就变成了
+    平台级的写权限。写入端由 acl_routes._validate_grant_scope 保证不会再产生这类
+    记录，这里对存量数据同样做前置过滤。
     """
     from models.acl import ACLEntry
 
@@ -102,6 +107,7 @@ async def _platform_feature_grants(
     result = await db.execute(
         select(ACLEntry.resource_id, ACLEntry.action).where(
             ACLEntry.resource_type == PLATFORM_RESOURCE_KIND,
+            ACLEntry.project_id.is_(None),
             ACLEntry.principal.in_(principals),
             ACLEntry.revoked == False,  # noqa: E712
             or_(ACLEntry.expires_at.is_(None), ACLEntry.expires_at > now),

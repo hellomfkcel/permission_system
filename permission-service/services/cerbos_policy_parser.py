@@ -118,16 +118,21 @@ class PolicyIndex:
     resource_actions_scoped: dict[tuple[str, str], set[str]] = field(
         default_factory=dict
     )
-    # 派生角色 → parentRoles（激活它的身份角色，不是权限来源）
-    derived_role_parents: dict[str, list[str]] = field(default_factory=dict)
-    # 派生角色 → 激活方式（identity / grant / acl）
-    role_activation: dict[str, str] = field(default_factory=dict)
+    # (派生角色, 命名空间) → parentRoles（激活它的身份角色，不是权限来源）
+    # 按命名空间索引：Cerbos 的派生角色定义归属于 derivedRoles 集合，
+    # 两个项目各定义一个同名角色是合法的（集合名不同），只按角色名单键会互相覆盖，
+    # 管理台就会把 A 项目角色的激活条件显示成 B 项目那一份。
+    derived_role_parents_scoped: dict[tuple[str, str], list[str]] = field(
+        default_factory=dict
+    )
+    # (派生角色, 命名空间) → 激活方式（identity / grant / acl）
+    role_activation_scoped: dict[tuple[str, str], str] = field(default_factory=dict)
     # 角色 → 出现过的命名空间集合
     role_namespaces: dict[str, set[str]] = field(default_factory=dict)
     # 资源类型 → 出现过的命名空间集合
     resource_namespaces: dict[str, set[str]] = field(default_factory=dict)
-    # 在 derivedRoles 文档中定义过的角色名
-    defined_derived_roles: set[str] = field(default_factory=set)
+    # 在 derivedRoles 文档中定义过的 (角色名, 命名空间)
+    defined_derived_roles_scoped: set[tuple[str, str]] = field(default_factory=set)
     # 解析失败的文件，供 /api/v1/policies 侧暴露给管理员
     parse_errors: list[str] = field(default_factory=list)
 
@@ -160,6 +165,20 @@ class PolicyIndex:
             name
             for name, namespaces in self.resource_namespaces.items()
             if namespaces & allowed
+        }
+
+    def resources_owned_by(self, namespace: str) -> set[str]:
+        """返回**归属**于该命名空间的资源类型（不含全局可见的平台层资源）。
+
+        与 visible_resources 的区别：可见 ≠ 可写。生成项目级策略时必须用本方法 ——
+        `platform` / `project_permission` 对每个项目都可见，但它们是平台层资源，
+        项目目录里不得出现它们的资源策略（否则与 platform/ 下的策略构成
+        同一个 Cerbos 模块 ID）。
+        """
+        return {
+            name
+            for name, namespaces in self.resource_namespaces.items()
+            if namespace in namespaces
         }
 
     # ── 作用域内的动作 ──
@@ -196,9 +215,49 @@ class PolicyIndex:
 
     # ── 角色分类 ──
 
-    def role_kind(self, name: str) -> str:
-        """derived = 策略中定义的派生角色；identity = Keycloak 身份角色。"""
-        return "derived" if name in self.defined_derived_roles else "identity"
+    def resource_layer(self, resource_type: str) -> str:
+        """资源类型属于哪一层：platform / project / unknown。
+
+        授权记录必须与资源所在的层对齐：平台层资源（platform、
+        project_permission）的授权是平台级的（project_id IS NULL），
+        项目层资源的授权必须带项目。层级判断的唯一依据是策略文件所在的命名空间，
+        不在代码里维护第二份资源类型清单。
+        """
+        namespaces = self.resource_namespaces.get(resource_type)
+        if not namespaces:
+            return "unknown"
+        if PLATFORM_NAMESPACE in namespaces:
+            return "platform"
+        return "project"
+
+    def _namespaces_in_scope(self, name: str, project_id: str | None) -> list[str]:
+        """该角色在查询作用域内出现过的命名空间，项目命名空间优先。"""
+        allowed = self._namespaces_for(project_id)
+        namespaces = self.role_namespaces.get(name, set())
+        if allowed is not None:
+            namespaces = namespaces & allowed
+        scoped = sorted(namespaces - _GLOBAL_NAMESPACES)
+        globals_ = sorted(namespaces & _GLOBAL_NAMESPACES)
+        return scoped + globals_
+
+    def role_kind(self, name: str, project_id: str | None = None) -> str:
+        """derived = 策略中定义的派生角色；identity = Keycloak 身份角色。
+
+        按作用域判断：同一个名字可能在 A 项目是派生角色、在 B 项目只是被引用的
+        父角色，查 A 时应答 derived，查 B 时应答 identity。
+        """
+        for namespace in self._namespaces_in_scope(name, project_id):
+            if (name, namespace) in self.defined_derived_roles_scoped:
+                return "derived"
+        return "identity"
+
+    def parents_of(self, name: str, project_id: str | None = None) -> list[str]:
+        """激活该角色的身份角色（parentRoles），按作用域取。"""
+        for namespace in self._namespaces_in_scope(name, project_id):
+            parents = self.derived_role_parents_scoped.get((name, namespace))
+            if parents is not None:
+                return parents
+        return []
 
     def activation_of(self, name: str, project_id: str | None = None) -> str:
         """角色的激活方式。
@@ -206,8 +265,10 @@ class PolicyIndex:
         派生角色取其激活条件的分类；身份角色若其被授予的动作全部带授权条件，
         同样记为 grant —— 例如 project_permission.yaml 中委托给 user 的规则。
         """
-        if name in self.role_activation:
-            return self.role_activation[name]
+        for namespace in self._namespaces_in_scope(name, project_id):
+            activation = self.role_activation_scoped.get((name, namespace))
+            if activation is not None:
+                return activation
         actions = self.actions_for_role(name, project_id)
         conditional = self.conditional_actions_for_role(name, project_id)
         if actions and actions == conditional:
@@ -304,9 +365,9 @@ def _index_derived_roles(index: PolicyIndex, doc: dict, namespace: str) -> None:
         if not name:
             continue
         parents = definition.get("parentRoles") or []
-        index.defined_derived_roles.add(name)
-        index.derived_role_parents[name] = parents
-        index.role_activation[name] = _classify_condition(
+        index.defined_derived_roles_scoped.add((name, namespace))
+        index.derived_role_parents_scoped[(name, namespace)] = parents
+        index.role_activation_scoped[(name, namespace)] = _classify_condition(
             definition.get("condition")
         )
         index.role_namespaces.setdefault(name, set()).add(namespace)
@@ -432,6 +493,11 @@ def get_resource_actions_map(project_id: str | None = None) -> dict[str, list[st
     }
 
 
+def get_resource_layer(resource_type: str) -> str:
+    """资源类型所属的授权层级：platform / project / unknown。"""
+    return get_policy_index().resource_layer(resource_type)
+
+
 def get_role_effective_permissions(
     name: str, project_id: str | None = None
 ) -> list[str]:
@@ -473,13 +539,17 @@ def describe_role(name: str, project_id: str | None = None) -> dict:
     elif UNSCOPED_PROJECT in namespaces:
         namespace = UNSCOPED_PROJECT
     else:
-        scoped = sorted(namespaces)
-        namespace = scoped[0] if scoped else UNSCOPED_PROJECT
+        # 项目级角色：取查询作用域内的那一个，而不是字典序第一个 ——
+        # 否则查 B 项目的同名角色会显示成 A 项目的归属。
+        in_scope = index._namespaces_in_scope(name, project_id)
+        namespace = in_scope[0] if in_scope else (
+            sorted(namespaces)[0] if namespaces else UNSCOPED_PROJECT
+        )
 
     return {
         "name": name,
-        "kind": index.role_kind(name),
-        "activated_by": index.derived_role_parents.get(name, []),
+        "kind": index.role_kind(name, project_id),
+        "activated_by": index.parents_of(name, project_id),
         "activation": index.activation_of(name, project_id),
         "permissions": sorted(index.actions_for_role(name, project_id)),
         "conditional_permissions": sorted(

@@ -209,6 +209,74 @@ def test_role_kind_and_activation(policies_dir):
     assert by_name["user"]["conditional_permissions"] == ["platform:read"]
 
 
+def test_same_role_name_in_two_projects_does_not_bleed(policies_dir, tmp_path):
+    """两个项目各定义一个同名派生角色时，激活条件 / 归属互不覆盖。
+
+    Cerbos 允许这种情况（派生角色定义归属于 derivedRoles 集合，集合名不同即可），
+    所以索引必须按 (角色名, 命名空间) 建键。只按角色名单键时，后解析的那份会覆盖
+    先解析的，管理台就把 A 项目角色的父角色和归属显示成 B 项目那一份。
+    """
+    _write(policies_dir, "one/derived_roles/r.yaml", """
+        apiVersion: api.cerbos.dev/v1
+        derivedRoles:
+          name: one_roles
+          definitions:
+            - name: shared_name
+              parentRoles: ["user"]
+              condition:
+                match:
+                  expr: >
+                    request.principal.attr.granted_actions[request.resource.id]
+                      .exists(x, x == "read")
+    """)
+    _write(policies_dir, "one/resource_policies/x.yaml", """
+        apiVersion: api.cerbos.dev/v1
+        resourcePolicy:
+          version: "default"
+          resource: "one_doc"
+          importDerivedRoles: ["one_roles"]
+          rules:
+            - actions: ["one:read"]
+              effect: EFFECT_ALLOW
+              derivedRoles: ["shared_name"]
+    """)
+    _write(policies_dir, "two/derived_roles/r.yaml", """
+        apiVersion: api.cerbos.dev/v1
+        derivedRoles:
+          name: two_roles
+          definitions:
+            - name: shared_name
+              parentRoles: ["system_admin"]
+              condition:
+                match:
+                  expr: "true"
+    """)
+    _write(policies_dir, "two/resource_policies/x.yaml", """
+        apiVersion: api.cerbos.dev/v1
+        resourcePolicy:
+          version: "default"
+          resource: "two_doc"
+          importDerivedRoles: ["two_roles"]
+          rules:
+            - actions: ["two:write"]
+              effect: EFFECT_ALLOW
+              derivedRoles: ["shared_name"]
+    """)
+    parser.invalidate_role_actions_cache()
+
+    one = parser.describe_role("shared_name", "one")
+    two = parser.describe_role("shared_name", "two")
+
+    assert one["permissions"] == ["one:read"]
+    assert two["permissions"] == ["two:write"]
+    assert one["activated_by"] == ["user"]
+    assert two["activated_by"] == ["system_admin"]
+    assert one["activation"] == parser.ACTIVATION_GRANT
+    assert two["activation"] == parser.ACTIVATION_IDENTITY
+    assert one["project_id"] == "one"
+    assert two["project_id"] == "two"
+
+
 def test_archived_versions_are_ignored(policies_dir):
     """.versions/ 下的历史快照不参与解析。"""
     assert parser.get_parse_errors() == []

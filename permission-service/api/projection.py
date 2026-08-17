@@ -138,11 +138,15 @@ async def get_visibility(
     """
     project_id = _project_of(request)
 
-    # 1. 查 mount_registry
-    stmt = select(MountRegistry).where(
+    # 1. 查 mount_registry（按调用方项目：不同项目可用相同的 doc_id / kb_id，
+    #    不带项目条件会读到别的项目的挂载，把本项目的文档判成 unmounted）
+    mount_conditions = [
         MountRegistry.doc_id == body.doc_id,
         MountRegistry.kb_id == body.channel.kb,
-    )
+    ]
+    if project_id is not None:
+        mount_conditions.append(MountRegistry.project_id == project_id)
+    stmt = select(MountRegistry).where(*mount_conditions)
     result = await db.execute(stmt)
     mount = result.scalar_one_or_none()
 
