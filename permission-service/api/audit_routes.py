@@ -67,6 +67,30 @@ class SimulateResult(BaseModel):
     resource_summary: dict = Field(default_factory=dict, description="使用的 Resource 摘要")
 
 
+def _audit_project_conditions(scope: ProjectScope, project_id: str | None) -> list:
+    """审计事件的项目范围过滤条件（project_id 存于 change_detail JSONB）。
+
+    与其它读端点同一套范围语义，供审计查询与事件重放共用：
+      显式 project_id → 校验在管理员范围内，按该项目过滤；
+      平台管理员不传 → 不过滤（全部项目）；
+      非平台管理员不传 → 限定到自己的项目集合；无项目归属则一条都看不到。
+
+    未带 project_id 的事件（平台层 / 早期未归档）对非平台管理员不可见 —— 项目管理员
+    只能看/重放本项目的变更，看不到跨项目与平台级事件流。
+    """
+    pid_col = PermissionChange.change_detail["project_id"].astext
+    if project_id:
+        assert_project_scope(scope, project_id)
+        return [pid_col == project_id]
+    if scope.is_platform_admin:
+        return []
+    project_ids = scope.project_ids or set()
+    if not project_ids:
+        from sqlalchemy import false
+        return [false()]
+    return [pid_col.in_(project_ids)]
+
+
 # ── 端点 ──
 
 
@@ -125,18 +149,8 @@ async def list_audit_entries(
         except ValueError:
             raise HTTPException(status_code=422, detail="Invalid to_time format. Use ISO 8601.")
 
-    # 项目范围过滤
-    if project_id:
-        assert_project_scope(scope, project_id)
-        conditions.append(
-            PermissionChange.change_detail["project_id"].astext == project_id
-        )
-    elif not scope.is_platform_admin and scope.project_ids is not None:
-        # 非 platform_admin → 仅显示所属项目的审计日志
-        if len(scope.project_ids) > 0:
-            conditions.append(
-                PermissionChange.change_detail["project_id"].astext.in_(scope.project_ids)
-            )
+    # 项目范围过滤（与事件重放共用同一套范围语义）
+    conditions.extend(_audit_project_conditions(scope, project_id))
 
     stmt = (
         select(PermissionChange)
@@ -356,6 +370,9 @@ class ReplayRequest(BaseModel):
     to_version: int | None = Field(None, description="结束版本号（含），默认到最新")
     limit: int = Field(500, ge=1, le=5000, description="最大重放条数")
     dry_run: bool = Field(True, description="dry_run=True 仅列出事件不发布")
+    project_id: str | None = Field(
+        None, description="按项目过滤重放范围；平台管理员不传=全部项目"
+    )
 
 
 class ReplayResult(BaseModel):
@@ -373,6 +390,7 @@ async def replay_events(
     body: ReplayRequest,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
     _perm: None = Depends(require_platform_permission("audit_mgmt", "platform:write")),
 ) -> ReplayResult:
     """事件重放 / 补消费 — 从指定版本开始重新发布事件到 Redis。需要管理员认证。
@@ -384,11 +402,16 @@ async def replay_events(
 
     dry_run=True（默认）：仅列出事件，不实际发布。
     dry_run=False：发布到 Redis Pub/Sub "visibility_changed" 频道。
+
+    重放读取的是全局事件流（版本号跨项目单调递增），既会在响应中回带 change_detail，
+    又会在 dry_run=False 时把事件重新打进共享的 Redis 频道。因此和审计查询一样按项目
+    范围收口：项目管理员只能看/重放本项目的事件，平台管理员可跨项目重放。
     """
-    # 查询指定版本范围内的事件
+    # 查询指定版本范围内的事件（叠加项目范围过滤）
     conditions = [PermissionChange.version >= body.from_version]
     if body.to_version is not None:
         conditions.append(PermissionChange.version <= body.to_version)
+    conditions.extend(_audit_project_conditions(scope, body.project_id))
 
     stmt = (
         select(PermissionChange)
