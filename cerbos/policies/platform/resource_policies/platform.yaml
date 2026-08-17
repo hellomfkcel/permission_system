@@ -42,10 +42,32 @@ resourcePolicy:
           expr: >
             request.resource.id in ["audit_mgmt", "playground", "dashboard"]
 
-    # 项目成员基线：无平台角色的项目成员可只读几个基础模块
-    # project_member 是后端注入的合成角色，对应 project_members 表中的成员资格；
-    # 成员可见哪些模块由本规则决定。
-    - name: "project_member_baseline"
+    # 项目管理员：项目可见的 7 个业务模块读写。
+    # project_admin 是后端按 project_members.role=project_admin 注入的合成角色；
+    # 准入表达"能进这类模块"，写操作具体落在哪个项目由数据层按 project_id 过滤。
+    - name: "project_admin_manage"
+      actions: ["platform:read", "platform:write"]
+      effect: EFFECT_ALLOW
+      roles: ["project_admin"]
+      condition:
+        match:
+          expr: >
+            request.resource.id in
+              ["resource_mgmt", "role_mgmt", "permission_mgmt",
+               "restriction_mgmt", "policy_mgmt", "audit_mgmt", "playground"]
+
+    # 项目管理员：概览首页只读
+    - name: "project_admin_dashboard"
+      actions: ["platform:read"]
+      effect: EFFECT_ALLOW
+      roles: ["project_admin"]
+      condition:
+        match:
+          expr: request.resource.id == "dashboard"
+
+    # 项目成员（project_viewer）：只读子集 —— 看得到项目的资源与角色，
+    # 但不涉及权限/策略/封禁/审计等管理面。
+    - name: "project_member_readonly"
       actions: ["platform:read"]
       effect: EFFECT_ALLOW
       roles: ["project_member"]
@@ -53,7 +75,7 @@ resourcePolicy:
         match:
           expr: >
             request.resource.id in
-              ["dashboard", "resource_mgmt", "user_mgmt", "role_mgmt"]
+              ["dashboard", "resource_mgmt", "role_mgmt"]
 
     # ── 按功能委托：平台功能授权记录（acl_entries: resource_type='platform'）──
     # granted_actions 的键为平台功能 ID，值为该功能上被授予的 platform:* 动作。

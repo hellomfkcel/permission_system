@@ -1180,30 +1180,49 @@ def _get_resource_type_labels() -> dict[str, str]:
 @router.get("/config", response_model=SystemConfigResponse)
 async def get_system_config(
     admin: Principal = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
     project_id: str | None = Query(None, description="按项目过滤自定义资源类型（不传=全部）"),
 ) -> SystemConfigResponse:
-    """返回系统运行时配置（管理台 Settings 页面动态展示）。需要管理员认证。
+    """返回系统运行时配置。需要管理员认证。
 
-    project_id 由前端 API 拦截器自动注入（从 localStorage admin_current_project 读取）。
-    - 平台模式（不传）：resource_actions 包含全部项目的自定义资源类型
-    - 项目模式（传 project_id）：resource_actions 仅包含该项目的自定义类型 + 内置类型
+    此端点服务两类调用方，权限不同：
+    - Settings 页面（平台专属）：service_port / cerbos_pdp_url / keycloak_* /
+      rate_limits / derived_roles_count / resource_rules 等运行时内部配置，
+      仅在调用方具备 settings:platform:read 时返回，否则脱敏为空。
+    - 权限授予对话框（项目管理员也用）：resource_actions / resource_type_labels /
+      platform_features 资源目录，始终返回 —— 不能因缺 settings 权限而切断
+      项目管理员的授权链路。
 
-    替代 Settings 页面中硬编码的端口号、限流值、策略规则数。
+    project_id 由前端 API 拦截器注入，决定 resource_actions 的项目作用域。
     """
+    from services.platform_authorizer import (
+        PlatformAuthorizationUnavailable,
+        resolve_platform_permissions,
+    )
+
+    can_see_settings = False
+    try:
+        perms = await resolve_platform_permissions(db, admin.user_id, admin.roles)
+        acts = perms.get("settings", [])
+        can_see_settings = "platform:read" in acts or "platform:write" in acts
+    except PlatformAuthorizationUnavailable:
+        can_see_settings = False
+
+    empty_limits: dict[str, str] = {}
     return SystemConfigResponse(
-        service_port=settings.port,
-        cerbos_pdp_url=settings.cerbos_pdp_url,
-        keycloak_server_url=settings.keycloak_server_url,
-        keycloak_realm=settings.keycloak_realm,
+        service_port=settings.port if can_see_settings else 0,
+        cerbos_pdp_url=settings.cerbos_pdp_url if can_see_settings else "",
+        keycloak_server_url=settings.keycloak_server_url if can_see_settings else "",
+        keycloak_realm=settings.keycloak_realm if can_see_settings else "",
         rate_limits={
             "check": f"{settings.check_rate_limit}/s",
             "check_batch": f"{settings.check_batch_rate_limit}/s",
             "filter": f"{settings.filter_rate_limit}/s",
             "prefilter": f"{settings.prefilter_rate_limit}/s",
             "visibility": f"{settings.visibility_rate_limit}/s",
-        },
-        derived_roles_count=_count_derived_roles(),
-        resource_rules=sorted(VALID_ACTIONS),
+        } if can_see_settings else empty_limits,
+        derived_roles_count=_count_derived_roles() if can_see_settings else 0,
+        resource_rules=sorted(VALID_ACTIONS) if can_see_settings else [],
         resource_actions=_get_resource_actions(project_id),
         resource_type_labels=_get_resource_type_labels(),
         platform_features=_get_platform_features(),

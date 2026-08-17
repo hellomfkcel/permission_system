@@ -768,6 +768,7 @@ def _assert_no_module_id_conflict(documents: list[dict], target: Path) -> None:
 async def list_policy_files(
     admin: Principal = Depends(get_current_admin),
     scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("policy_mgmt", "platform:read")),
     project_id: str | None = Query(None, description="按项目过滤策略（可选，不传=全部可见项目）"),
 ) -> list[PolicyFileResponse]:
     """列出 Cerbos 活跃策略文件及其 YAML 内容。需要管理员认证。
