@@ -186,16 +186,3 @@ async def resolve_platform_permissions(
         if allowed:
             permissions[feature_id] = sorted(allowed)
     return permissions
-
-
-async def check_platform_permission(
-    db: AsyncSession, user_id: str, jwt_roles: list[str],
-    feature_id: str, action: str,
-) -> bool:
-    """判定单个平台功能上的单个动作。
-
-    Raises:
-        PlatformAuthorizationUnavailable: Cerbos 调用失败。
-    """
-    permissions = await resolve_platform_permissions(db, user_id, jwt_roles)
-    return action in permissions.get(feature_id, [])

@@ -39,7 +39,6 @@ import httpx
 # ══════════════════════════════════════════════════════════════
 
 BASE_URL = "http://localhost:18080"
-CERBOS_URL = "http://localhost:13592"
 TENANT = "tenant-dev"
 
 # ── 服务间 API Key（用于 /v1/* 端点的 X-Api-Key 认证）──

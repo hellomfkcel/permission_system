@@ -1134,21 +1134,6 @@ async def get_dashboard_stats(
 # ══════════════════════════════════════════════════════════════
 
 
-async def filter_by_project_scope(
-    admin: Principal,
-    db: AsyncSession,
-) -> set[str] | None:
-    """返回当前管理员可访问的项目 ID 集合。
-
-    None = platform_admin，不设过滤。
-    空集 = 普通管理员但无项目归属，看不到任何数据。
-    """
-    project_ids = await get_admin_project_ids(admin.user_id, admin.roles)
-    if project_ids is not None and len(project_ids) == 0:
-        return set()  # 无项目归属的普通管理员
-    return project_ids  # None (platform_admin) 或项目ID集合
-
-
 class SystemConfigResponse(BaseModel):
     """系统运行时配置 — 供管理台 Settings 页面动态展示。"""
     service_port: int

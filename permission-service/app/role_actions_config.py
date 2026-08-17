@@ -23,14 +23,8 @@ PLATFORM_ACTIONS: set[str] = {"platform:read", "platform:write"}
 
 PROJECT_PERMISSION_ACTIONS: set[str] = {"permission:read", "permission:write"}
 
-# 项目权限数据类别，对应 project_permission.yaml 中的 resource.id
-PROJECT_PERMISSION_KINDS: dict[str, str] = {
-    "member_list": "项目成员列表",
-    "role_assignment": "成员角色分配",
-    "permission_matrix": "项目权限矩阵",
-    "role_definition": "项目内角色定义",
-    "grant_record": "授权记录",
-}
+# 权限数据类别（member_list / role_assignment / ...）不在此维护：
+# 它们是 project_permission.yaml 中的 resource.id，取值由策略文件决定。
 
 # ══════════════════════════════════════════════════════════════
 # 项目资源动作（kb/document）
