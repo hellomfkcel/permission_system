@@ -771,6 +771,7 @@ async def sync_users_from_keycloak() -> SyncResult:
 async def list_cached_users(
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
     project_id: str | None = Query(None, description="按项目 ID 过滤用户（可选）"),
 ) -> list[UserInfo]:
     """查询用户列表。需要管理员认证。
@@ -778,7 +779,18 @@ async def list_cached_users(
     三级用户模型：租户 → 项目 → 用户
     - 平台模式（不传 project_id）：返回 user_cache 全部用户 + 租户归属 + 项目归属
     - 项目模式（传 project_id）：仅返回 project_members 中的项目成员
+
+    范围收口：全量用户目录是平台级视图，仅平台管理员可取；项目管理员须限定到自己
+    的项目，只能看该项目成员。
     """
+    if project_id:
+        assert_project_scope(scope, project_id)
+    elif not scope.is_platform_admin:
+        raise HTTPException(
+            status_code=400,
+            detail="project_id is required for non-platform administrators.",
+        )
+
     from models.tenant import TenantMembership, Tenant
     from models.project import ProjectMember as _PM
     from sqlalchemy import func as sa_func
@@ -1001,6 +1013,7 @@ _RESTRICTION_LABELS: dict[str, str] = {
 async def get_dashboard_stats(
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
     project_id: str | None = Query(None, description="按项目 ID 过滤统计（可选）"),
 ) -> DashboardStats:
     """Dashboard 数据驱动概览统计。需要管理员认证。
@@ -1012,8 +1025,19 @@ async def get_dashboard_stats(
       - project_count = 0
       - resource_stats = 仅该项目的资源统计
 
+    范围收口：显式 project_id 必须在管理员范围内；跨项目汇总（不传 project_id）仅
+    平台管理员可用，项目管理员须限定到自己的项目，避免读到别项目的统计。
+
     所有统计走 GROUP BY 动态查询，新增资源类型无需修改代码。
     """
+    if project_id:
+        assert_project_scope(scope, project_id)
+    elif not scope.is_platform_admin:
+        raise HTTPException(
+            status_code=400,
+            detail="project_id is required for non-platform administrators.",
+        )
+
     from models.resource import ResourceRegistry
     from models.acl import ACLEntry
     from models.restriction import Restriction
@@ -1268,23 +1292,34 @@ class RecentChangesResponse(BaseModel):
 async def get_recent_changes(
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
     limit: int = Query(20, description="返回条数上限"),
     project_id: str | None = Query(None, description="按项目 ID 过滤变更（可选）"),
 ) -> RecentChangesResponse:
     """返回最近权限变更时间线和待处理告警。需要管理员认证。
 
     项目模式下通过 change_detail JSONB 中的 project_id 过滤。
+
+    范围收口：变更时间线是行级数据（含 principal），与审计查询同口径按项目范围过滤 ——
+    显式 project_id 须在范围内；项目管理员不传时只看自己项目的变更；无项目归属看不到。
     """
     from models.change_log import PermissionChange
     from models.acl import ACLEntry
     from sqlalchemy import func as sa_func
 
-    # ── 最近变更（按版本降序）──
+    # ── 最近变更（按版本降序，叠加项目范围过滤）──
+    pid_col = PermissionChange.change_detail["project_id"].astext
     changes_conditions = []
     if project_id:
-        changes_conditions.append(
-            PermissionChange.change_detail["project_id"].astext == project_id
-        )
+        assert_project_scope(scope, project_id)
+        changes_conditions.append(pid_col == project_id)
+    elif not scope.is_platform_admin:
+        pids = scope.project_ids or set()
+        if not pids:
+            from sqlalchemy import false
+            changes_conditions.append(false())
+        else:
+            changes_conditions.append(pid_col.in_(pids))
     stmt = (
         select(PermissionChange)
         .where(*changes_conditions)

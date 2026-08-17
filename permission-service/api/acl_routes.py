@@ -501,6 +501,7 @@ async def get_effective_permissions(
     if resource_id:
         conditions.append(ACLEntry.resource_id == resource_id)
     if project_id:
+        assert_project_scope(scope, project_id)
         conditions.append(
             or_(ACLEntry.project_id == project_id, ACLEntry.project_id.is_(None))
         )
