@@ -437,6 +437,27 @@ bug。联调只能抽样发现症状（G5/G6/G7），穷举静态审计才暴露
 三道防线各司其职：Cerbos 判定管模块准入（维度 1），`assert_project_scope`/`require_*` 管项目与
 层级（维度 2），`test_authz_scope_guard.py` 管"维度 2 别再漏写"。离线静态测试合计 24 项全过。
 
-遗留设计点（待用户确认，非安全阻断）：provisioning（API Key/client/audience）现按 `project_mgmt`
-平台专属处理，项目管理员不能自助签发本项目凭证，需平台管理员代办。若要放开项目管理员自助，
-可把这几个变更端点从 `require_platform_admin` 调整为"项目管理员 + 本项目范围"，属设计取舍。
+### 10.7 设计取舍落定：provisioning 改为"项目管理员 + 本项目范围"自助
+
+10.6 曾把 provisioning（API Key / client / audience 增删）暂按平台专属处理并留待确认。用户确认
+**放开项目管理员自助**，据此收口：新增依赖 `require_project_admin(project_id_param)` —— 平台级身份
+（system_admin / platform_admin，见 `_is_platform_wide`）直接通过；否则要求调用者在**路径里的这个
+项目**中角色为 `project_admin`（`project_members.role`，兼容 user_id 存用户名或 UUID 两种）。
+
+六个 provisioning 变更端点（建删 client、签发/吊销 API Key、建删 audience）由 `require_platform_admin`
+改为 `require_project_admin("project_id")`；项目创建/删除仍是平台级（`require_platform_admin`）。
+
+真实栈复测（四主体）：
+
+```
+POST /projects/{pid}/api-keys        rag-v14   demo2
+  palice (rag-v14 project_admin)       201      403     ← 自己项目可签，别项目不行
+  bob    (demo2  project_admin)        403      201
+  pviewer(rag-v14 project_viewer)      403       -      ← 只读成员不可（非 admin）
+  admin  (system_admin)                201      201     ← 平台级全通
+add client 同形态复测一致。
+```
+
+要点：范围严格收口在路径 `{project_id}`，凭据里的项目身份说了算 —— 项目管理员只能给**自己**
+项目铸凭证，杜绝了 G8 里"为别项目铸 key"的越权；只读成员被角色判定挡住。`require_project_admin`
+已纳入门禁 ENFORCEMENT_MARKERS，静态门禁 3 项、离线测试 24 项全过。
