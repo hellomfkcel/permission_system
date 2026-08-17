@@ -33,7 +33,6 @@ resourcePolicy:
             has(request.principal.attr.granted_actions) &&
             request.resource.id in request.principal.attr.granted_actions
 """
-
 RAG_DERIVED = """
 apiVersion: api.cerbos.dev/v1
 derivedRoles:
@@ -57,7 +56,6 @@ derivedRoles:
         match:
           expr: "true"
 """
-
 RAG_RESOURCE = """
 apiVersion: api.cerbos.dev/v1
 resourcePolicy:
@@ -75,7 +73,6 @@ resourcePolicy:
       effect: EFFECT_ALLOW
       derivedRoles: ["acl_user"]
 """
-
 OTHER_DERIVED = """
 apiVersion: api.cerbos.dev/v1
 derivedRoles:
@@ -84,7 +81,6 @@ derivedRoles:
     - name: oa_employee
       parentRoles: ["user"]
 """
-
 OTHER_RESOURCE = """
 apiVersion: api.cerbos.dev/v1
 resourcePolicy:
@@ -96,8 +92,6 @@ resourcePolicy:
       effect: EFFECT_ALLOW
       roles: ["oa_employee"]
 """
-
-
 def _write(root: Path, rel: str, body: str) -> None:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)

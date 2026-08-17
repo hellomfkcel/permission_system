@@ -4,7 +4,6 @@ Revision ID: a7b8c9d0e1f2
 Revises: f1a2b3c4d5e6
 Create Date: 2026-08-17
 
-设计依据：docs/permission_model_v2.md §3 数据来源边界。
 
 迁移 d4f1a7c9b2e3 把 acl_entries / role_bindings / resource_registry /
 role_definitions 的唯一性改成了项目内唯一，即**明确允许不同项目使用相同的资源 ID**，

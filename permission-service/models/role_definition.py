@@ -1,7 +1,4 @@
-"""角色定义表 — 角色元数据权威源。
-
-设计依据：docs/manage_role_design.md §3.1 role_definitions 表。
-"""
+"""角色定义表 — 角色元数据权威源。"""
 
 import uuid
 from datetime import datetime
@@ -23,7 +20,6 @@ class RoleDefinition(Base):
     is_system=true 的角色不可删除（对应 Cerbos 中预定义的派生角色）。
     project_id=NULL 表示平台级角色（所有项目共享）。
     """
-
     __tablename__ = "role_definitions"
 
     id: Mapped[uuid.UUID] = mapped_column(

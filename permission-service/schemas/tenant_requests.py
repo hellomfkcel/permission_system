@@ -1,7 +1,4 @@
-"""租户管理 — 请求 Pydantic 模型。
-
-设计依据：docs/tenant_design.md §3.2.1 租户 CRUD + §3.2.2 成员管理。
-"""
+"""租户管理 — 请求 Pydantic 模型。"""
 
 from pydantic import BaseModel, Field
 

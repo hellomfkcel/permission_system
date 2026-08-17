@@ -1,7 +1,4 @@
-"""管理台认证 API — JWT 验证 + Keycloak 同步触发 + 管理台 API 鉴权依赖。
-
-设计依据：docs/外部系统设计.md §4 与 IdP 集成 + frontend-design.md §0 认证与租户。
-"""
+"""管理台认证 API — JWT 验证 + Keycloak 同步触发 + 管理台 API 鉴权依赖。"""
 
 from fastapi import APIRouter, HTTPException, Depends, Header, Query
 from app.config import settings
@@ -27,7 +24,7 @@ router = APIRouter(prefix="/api/v1/auth", tags=["admin-auth"])
 # ══════════════════════════════════════════════════════════════
 
 
-# ── 管理员角色名（设计依据 §2.2 角色层级）──
+# 管理员角色名
 _ADMIN_ROLES: set[str] = {"system_admin", "admin"}
 _PLATFORM_ADMIN_ROLE = "platform_admin"
 
@@ -93,7 +90,7 @@ async def get_current_admin(
 
     所有管理台写操作 (grant/revoke/bind/unbind/add restriction) 须通过此依赖注入。
 
-    Phase 4: 项目级隔离。返回的 Principal 包含 admin_project_ids 属性。
+    项目级隔离。返回的 Principal 包含 admin_project_ids 属性。
 
     Raises:
         401: 未提供 token 或 token 无效/过期。
@@ -114,7 +111,7 @@ async def get_current_admin(
             detail=f"Invalid or expired admin token: {str(e)}",
         ) from e
 
-    # P0-1: 验证访问权限
+    # 验证访问权限
     # 优先检查 JWT 角色（system_admin/admin/platform_admin → 直接通过）
     if _ADMIN_ROLES.intersection(principal.roles) or _PLATFORM_ADMIN_ROLE in principal.roles:
         return principal
@@ -153,9 +150,6 @@ async def require_platform_admin(
     """依赖注入 — 项目创建/删除等平台级写操作。
 
     判定同样交给 Cerbos：project_mgmt 模块上的 platform:write。
-    此前这里直接判断 `platform_admin in roles`，是绕过 platform.yaml 的
-    第三条判断路径 —— 被授予 project_mgmt 写权限的委托管理员会被它挡下，
-    而策略文件明明允许。
     """
     from app.database import async_session
     from services.platform_authorizer import PlatformAuthorizationUnavailable
@@ -230,7 +224,6 @@ class ProjectScope:
     - is_platform_admin=True → 可访问全部项目
     - project_ids 为空集 → 无项目归属，看不到任何项目数据
     """
-
     def __init__(self, project_ids: set[str] | None, is_platform_admin: bool):
         self._project_ids = project_ids
         self.is_platform_admin = is_platform_admin
@@ -302,10 +295,7 @@ async def _get_platform_permissions(
     返回 {feature_id: [actions]}，如 {"audit_mgmt": ["platform:read"]}。
 
     唯一判定路径：结果全部来自 Cerbos 对 platform.yaml 的判定
-    （services/platform_authorizer.py）。此前这里手写了一份
-    "platform_admin → 全部 / platform_viewer → 全部只读 / platform_auditor →
-    三个模块" 的映射，与策略文件里的规则互为副本，改一处不改另一处就会
-    出现管理台放行而策略模拟器拒绝（或反之）的分叉。
+    （services/platform_authorizer.py），本函数不做任何角色名判断。
     """
     from services.platform_authorizer import resolve_platform_permissions
 
@@ -324,8 +314,8 @@ def require_platform_permission(feature_id: str, action: str = "platform:read"):
             ...
 
     判定完全交给 Cerbos：角色能进哪些模块写在 platform.yaml 里，这里不做任何
-    角色名判断，也没有"管理员直接放行"的快捷分支 —— 那个分支正是第二条判断路径。
-    Cerbos 不可达时 fail-closed 返回 503，而不是回退到本地推断。
+    角色名判断，也不设"管理员直接放行"的快捷分支。
+    Cerbos 不可达时 fail-closed 返回 503，不回退到本地推断。
     """
     async def _check(
         admin: Principal = Depends(get_current_admin),
@@ -1130,7 +1120,7 @@ async def get_dashboard_stats(
 
 
 # ══════════════════════════════════════════════════════════════
-# 系统配置端点（P1-6：动态配置暴露，替代 Settings 页面硬编码）
+# 系统配置端点
 # ══════════════════════════════════════════════════════════════
 
 
@@ -1198,7 +1188,7 @@ async def get_system_config(
     - 平台模式（不传）：resource_actions 包含全部项目的自定义资源类型
     - 项目模式（传 project_id）：resource_actions 仅包含该项目的自定义类型 + 内置类型
 
-    P1-6 修复：替代 Settings 页面中硬编码的端口号、限流值、策略规则数。
+    替代 Settings 页面中硬编码的端口号、限流值、策略规则数。
     """
     return SystemConfigResponse(
         service_port=settings.port,
@@ -1221,7 +1211,7 @@ async def get_system_config(
 
 
 # ══════════════════════════════════════════════════════════════
-# 最近变更时间线端点（P1-7：Dashboard 时间线 + 告警面板）
+# 最近变更时间线端点
 # ══════════════════════════════════════════════════════════════
 
 

@@ -1,14 +1,5 @@
 /**
  * AuditLogViewer — 审计日志查询与导出组件。
- *
- * 设计依据：docs/外部系统设计.md §3.3 /audit 审计日志页面 + §5.1 事件系统设计
- *          + docs/RAG系统设计v14.md §7.3 audit_log 表 — decision_id 跨系统取证。
- *
- * 功能：
- * - 按资源类型/ID/事件类型/关键词筛选
- * - 展开查看 change_detail JSON
- * - CSV / JSON 导出
- * - 事件类型中文标签 + 颜色编码
  */
 
 "use client";

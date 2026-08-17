@@ -28,7 +28,6 @@ resourcePolicy:
       effect: EFFECT_ALLOW
       roles: ["system_admin"]
 """
-
 PROJECT_POLICY_TEMPLATE = """
 apiVersion: api.cerbos.dev/v1
 resourcePolicy:
@@ -39,8 +38,6 @@ resourcePolicy:
       effect: EFFECT_ALLOW
       roles: ["{prefix}_base"]
 """
-
-
 def _write(root: Path, rel: str, body: str) -> None:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)

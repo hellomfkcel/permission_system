@@ -4,7 +4,6 @@ Revision ID: f1a2b3c4d5e6
 Revises: d4f1a7c9b2e3
 Create Date: 2026-08-17
 
-设计依据：docs/permission_model_v2.md
 
 设计底线：策略文件描述"结构"，DB 记录"事实"，Cerbos 做"决策"。
 本迁移把 DB 侧残留的"结构"数据清掉，使权限映射只有策略文件一个出处：
@@ -68,8 +67,8 @@ def upgrade() -> None:
     )
 
     # ── 3. 平台角色的 parentRoles 语义还原为"入场资格" ──
-    # platform_admin 此前记为 parent=["system_admin"]，读起来像"继承 system_admin
-    # 的权限"；实际它是独立的 Keycloak / 平台绑定角色，与 system_admin 平级。
+    # platform_admin 是独立的 Keycloak / 平台绑定角色，与 system_admin 平级，
+    # parentRoles 记为 ["user"] 表示入场资格而非权限继承。
     conn.execute(
         sa.text("""
             UPDATE role_definitions

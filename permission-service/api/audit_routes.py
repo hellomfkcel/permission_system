@@ -1,7 +1,4 @@
-"""管理台 API — 审计日志查询 + 策略模拟器 + 事件重放。
-
-设计依据：docs/外部系统设计.md §2.4.4 管理台专用 API + §5.2 事件可靠性保证。
-"""
+"""管理台 API — 审计日志查询 + 策略模拟器 + 事件重放。"""
 
 import json
 import structlog
@@ -77,10 +74,10 @@ class SimulateResult(BaseModel):
 async def list_audit_entries(
     resource_type: str | None = Query(None),
     resource_id: str | None = Query(None),
-    principal: str | None = Query(None, description="P2-3: 按主体过滤 (change_detail JSONB 查询)"),
-    decision_id: str | None = Query(None, description="P2-3: 按 Cerbos decision_id 精确查询"),
-    from_time: str | None = Query(None, description="P2-3: 起始时间 (ISO 8601)"),
-    to_time: str | None = Query(None, description="P2-3: 结束时间 (ISO 8601)"),
+    principal: str | None = Query(None, description="按主体过滤 (change_detail JSONB 查询)"),
+    decision_id: str | None = Query(None, description="按 Cerbos decision_id 精确查询"),
+    from_time: str | None = Query(None, description="起始时间 (ISO 8601)"),
+    to_time: str | None = Query(None, description="结束时间 (ISO 8601)"),
     from_version: int | None = Query(None),
     project_id: str | None = Query(None, description="按项目 ID 过滤 (change_detail JSONB)"),
     limit: int = Query(50, ge=1, le=200),
@@ -91,7 +88,7 @@ async def list_audit_entries(
 ) -> list[AuditEntry]:
     """审计日志查询 — 按条件过滤变更历史。需要管理员认证。
 
-    P2-3 修复：新增 principal、decision_id、from_time、to_time 过滤参数。
+    新增 principal、decision_id、from_time、to_time 过滤参数。
     项目级过滤通过 change_detail JSONB 的 project_id 字段实现。
     """
     from sqlalchemy import cast, String
@@ -104,17 +101,17 @@ async def list_audit_entries(
         conditions.append(PermissionChange.resource_id == resource_id)
     if from_version is not None:
         conditions.append(PermissionChange.version >= from_version)
-    # P2-3: principal 过滤（从 change_detail JSONB 的 principal 字段查询）
+    # principal 过滤（从 change_detail JSONB 的 principal 字段查询）
     if principal:
         conditions.append(
             PermissionChange.change_detail["principal"].astext.ilike(f"%{principal}%")
         )
-    # P2-3: decision_id 过滤
+    # decision_id 过滤
     if decision_id:
         conditions.append(
             PermissionChange.change_detail["decision_id"].astext == decision_id
         )
-    # P2-3: 时间范围过滤
+    # 时间范围过滤
     if from_time:
         try:
             ft = datetime.fromisoformat(from_time)
@@ -177,9 +174,6 @@ async def simulate(
     get_resource_acl + check_subject_ban + get_resource_attr），
     确保模拟结果反映实际权限数据，而非仅原始 Cerbos 策略。
 
-    修复：此前这里直接把 {principal: [actions]} 当作 granted_actions 传给
-    Cerbos —— 键是主体而不是资源作用域，派生角色永远匹配不上，
-    模拟结果与真实判定不一致。
     """
     from app.database import async_session
     from services.acl_resolver import (
@@ -339,7 +333,7 @@ async def simulate(
 
 
 # ══════════════════════════════════════════════════════════════
-# P2-14: 事件重放 / 补消费端点
+# 事件重放 / 补消费端点
 # ══════════════════════════════════════════════════════════════
 
 
@@ -369,8 +363,6 @@ async def replay_events(
     _perm: None = Depends(require_platform_permission("audit_mgmt", "platform:write")),
 ) -> ReplayResult:
     """事件重放 / 补消费 — 从指定版本开始重新发布事件到 Redis。需要管理员认证。
-
-    设计依据：docs/外部系统设计.md §5.2 事件可靠性保证 + §14.5c 戳记对账。
 
     使用场景：
     - RAG 侧事件订阅断开后补消费
@@ -447,7 +439,7 @@ async def replay_events(
 
 
 # ══════════════════════════════════════════════════════════════
-# P2-11: 策略文件内容服务
+# 策略文件内容服务
 # ══════════════════════════════════════════════════════════════
 
 
@@ -472,7 +464,7 @@ class PolicyWriteResult(BaseModel):
 def _get_policy_root(project_id: str | None = None) -> Path:
     """获取 Cerbos 策略文件根目录。
 
-    Phase 2: 支持按 project 隔离的策略目录。
+    支持按 project 隔离的策略目录。
     - project_id=None → 返回 policies/ 根目录（向后兼容）
     - project_id="rag-v14" → 返回 policies/rag-v14/
     """
@@ -521,12 +513,10 @@ def _validate_policy_yaml(yaml_content: str) -> tuple[bool, str]:
 
 
 async def _sync_policy_roles_to_db(project_id: str) -> dict[str, int]:
-    """策略文件写入后，把新出现的角色**建档**到 role_definitions 表。
+    """策略文件写入后，把新出现的角色建档到 role_definitions 表。
 
-    只同步档案信息（名称、激活角色、项目归属），**不写权限** ——
-    角色能执行哪些动作由策略文件回答，表里没有对应的列可写
-    （迁移 f1a2b3c4d5e6 已删除）。同步的目的只是让新角色在管理台可见、
-    可写描述、可统计绑定数。
+    只同步档案信息（名称、激活角色、项目归属），不写权限 —— 角色能执行哪些动作
+    由策略文件回答。建档的目的是让新角色在管理台可见、可写描述、可统计绑定数。
 
     Returns:
         {"created": N, "updated": N}
@@ -672,7 +662,7 @@ def _assert_policy_layer(yaml_content: str, namespace: str, target: Path) -> Non
     两条规则：
       1. 平台层资源（platform / project_permission）只能写在 platform/ 命名空间；
          项目目录里出现它们，等于用项目级写权限改平台层准入。
-      2. 新写入的模块 ID 不得与**其他文件**已声明的重复。
+      2. 新写入的模块 ID 不得与其他文件已声明的重复。
     """
     import yaml as _yaml
     from services.cerbos_policy_parser import PLATFORM_NAMESPACE, get_resource_layer
@@ -783,12 +773,9 @@ async def list_policy_files(
     """列出 Cerbos 活跃策略文件及其 YAML 内容。需要管理员认证。
 
     项目模式（传 project_id）：仅列出该项目的策略文件，需在管理员项目范围内。
-    平台模式（不传 project_id）：列出**管理员可见范围内**的策略文件 ——
-    平台管理员看全部；项目级管理员只看自己项目的目录，外加平台层与根目录下的
-    公共策略（它们对所有项目生效，可读不可写）。
-
-    此前不传 project_id 会无差别返回全部项目的策略内容，项目级管理员因此能读到
-    其他项目的完整策略。
+    平台模式（不传 project_id）：列出管理员可见范围内的策略文件。平台管理员看
+    全部；项目级管理员只看自己项目的目录，外加平台层与根目录下的公共策略
+    （对所有项目生效，可读不可写）。
 
     排除 .versions/ 目录（版本历史快照，非活跃策略）。
     """
@@ -843,7 +830,6 @@ async def write_policy_file(
 ) -> PolicyWriteResult:
     """创建或更新 Cerbos 策略文件。
 
-    设计依据：docs/外部系统设计.md §3.3 /policies 页面 — 策略编辑器 + 策略部署。
     安全措施：
     1. 路径遍历防护（禁止 .. 和绝对路径）
     2. YAML 结构校验
@@ -879,7 +865,7 @@ async def write_policy_file(
     # 检查是新文件还是更新
     is_new = not target_file.exists()
 
-    # P2-1: 自动保存旧版本快照（策略版本管理）
+    # 自动保存旧版本快照（策略版本管理）
     if not is_new:
         _snapshot_policy_version(policy_root, safe_path, target_file)
 
@@ -891,7 +877,7 @@ async def write_policy_file(
 
     # Cerbos PDP 自动热加载（watchForChanges: true），无需手动触发
 
-    # P3 修复：策略文件写入后失效角色动作映射缓存，
+    # 策略文件写入后失效角色动作映射缓存，
     # 确保下次权限判定使用最新的 Cerbos YAML 解析结果。
     from services.cerbos_policy_parser import invalidate_role_actions_cache
     invalidate_role_actions_cache()
@@ -935,7 +921,6 @@ async def upload_policy_file(
 ) -> PolicyUploadResult:
     """上传 Cerbos 策略文件到指定项目目录。
 
-    设计依据：docs/外部系统设计.md §3.3 /policies 页面 — 策略管理。
     流程：
     1. 读取上传文件内容（UTF-8）
     2. 校验 YAML 结构（apiVersion 等必要字段）
@@ -1078,7 +1063,7 @@ async def delete_policy_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete policy file: {str(e)}")
 
-    # P3 修复：策略文件删除后失效角色动作映射缓存。
+    # 策略文件删除后失效角色动作映射缓存。
     from services.cerbos_policy_parser import invalidate_role_actions_cache
     invalidate_role_actions_cache()
 
@@ -1096,7 +1081,7 @@ async def delete_policy_file(
 
 
 # ══════════════════════════════════════════════════════════════
-# P2-6: 策略部署状态检查
+# 策略部署状态检查
 # ══════════════════════════════════════════════════════════════
 
 
@@ -1120,7 +1105,6 @@ async def get_deploy_status(
     2. HTTP 探活 Cerbos PDP（GET / 返回 200 = PDP 运行中）
     3. 综合判定健康状态
 
-    设计依据：docs/外部系统设计.md §3.3 /policies — 策略部署 + 灰度发布。
     Cerbos PDP HTTP API 不存在 /api/policies 端点（仅 gRPC Admin API 有此能力），
     因此改用文件计数 + HTTP 探活的混合校验方案。
     """
@@ -1189,7 +1173,7 @@ async def get_deploy_status(
 
 
 # ══════════════════════════════════════════════════════════════
-# P2-2: YAML 语法校验
+# YAML 语法校验
 # ══════════════════════════════════════════════════════════════
 
 
@@ -1221,7 +1205,6 @@ async def validate_policy_yaml(
     4. resourcePolicy 的 rules/actions 完整性
     5. EFFECT_ALLOW/EFFECT_DENY 合法性
 
-    设计依据：docs/外部系统设计.md §3.3 /policies — 带语法高亮的编辑器 + 校验。
     """
     import yaml as yaml_lib
 
@@ -1299,7 +1282,7 @@ async def validate_policy_yaml(
 
 
 # ══════════════════════════════════════════════════════════════
-# P2-1: 策略版本管理 — 历史快照 + Diff
+# 策略版本管理 — 历史快照 + Diff
 # ══════════════════════════════════════════════════════════════
 
 import hashlib
@@ -1368,7 +1351,6 @@ async def list_policy_versions(
 ) -> list[PolicyVersionEntry]:
     """列出策略文件的所有历史版本。需要管理员认证。
 
-    设计依据：docs/外部系统设计.md §3.3 /policies 页面 — 策略版本历史。
     历史快照与当前策略同属一个命名空间，访问控制口径一致。
     """
     is_safe, safe_path = _validate_policy_path(policy_path)
@@ -1428,8 +1410,6 @@ async def diff_policy_versions(
     v2: str = Query(..., description="对比版本 ID"),
 ) -> PolicyDiffResponse:
     """对比两个策略版本的差异。需要管理员认证。
-
-    设计依据：docs/外部系统设计.md §3.3 /policies 页面 — Git 式 diff 视图。
 
     Args:
         v1: 基准版本（'current' = 当前生效版本，或版本 ID）。

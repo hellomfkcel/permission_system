@@ -1,11 +1,5 @@
 /**
  * RestrictionManager — 封禁与限制管理组件。
- *
- * 设计依据：docs/外部系统设计.md §2.4.4 限制管理 + §2.3.1 restrictions 表
- *          + docs/权限管理系统架构设计.md §5.2 授权管理 — 限制管理
- *
- * 型一（subject_ban）：封禁主体 → prefilter 返回 suspended=true
- * 型二（resource_restriction）：限制资源 → filter 端点 pre-deny
  */
 
 "use client";

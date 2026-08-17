@@ -1,7 +1,4 @@
-"""数据库引擎与会话管理。
-
-设计依据：docs/外部系统设计.md §2.3 数据模型 + 实施方案步骤 2.3。
-"""
+"""数据库引擎与会话管理。"""
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession

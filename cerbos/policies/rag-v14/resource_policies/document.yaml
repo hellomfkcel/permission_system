@@ -1,6 +1,4 @@
-# ══════════════════════════════════════════════════════════════
 # Layer 3 · rag-v14 · 文档资源策略
-# ══════════════════════════════════════════════════════════════
 #
 # 动作权限矩阵（ABAC 路）：
 #   动作          kb_reader kb_writer kb_admin project_admin platform_admin_role
@@ -17,8 +15,8 @@
 # 两者由后端从 resource_acl 表读出后注入，策略文件不含任何用户 ID 或角色名。
 #
 # 约定：
-#   ✓ 权限只授予 derivedRoles，身份角色（user / system_admin）不出现在授权规则；
-#   ✗ 无显式 DENY 规则，未命中即隐式拒绝。
+#   - 权限只授予 derivedRoles，身份角色（user / system_admin）不出现在授权规则；
+#   - 无显式 DENY 规则，未命中即隐式拒绝。
 apiVersion: api.cerbos.dev/v1
 resourcePolicy:
   version: "default"

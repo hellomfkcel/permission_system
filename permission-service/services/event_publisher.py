@@ -1,15 +1,11 @@
-"""Redis Pub/Sub + Stream 事件发布 + permission_changes 持久化。
+"""VisibilityChanged 事件发布 + permission_changes 持久化。
 
-设计依据：docs/外部系统设计.md §5.1 VisibilityChanged 事件 + §5.2 事件可靠性保证 + 实施方案步骤 5.2。
+双通道并行，互不阻塞：
+    Pub/Sub  低延迟实时通知，fire-and-forget
+    Stream   持久化消息，订阅方重启后可补消费
 
-P1-1 升级：在 Pub/Sub 基础上增加 Redis Stream 支持，实现事件持久化和断点续消费。
-- Pub/Sub：低延迟实时通知（fire-and-forget）
-- Stream：持久化消息（RAG subscriber 重启后可补消费）
-
-Stream 配置：
-- Key: visibility_changed_stream
-- MAXLEN: ~100,000（近似裁剪，防止内存膨胀）
-- Consumer Group: rag-visibility-consumers（RAG 侧 XREADGROUP 使用）
+Stream 配置：key=visibility_changed_stream，MAXLEN≈100,000（近似裁剪），
+消费组 rag-visibility-consumers。
 """
 
 import json
@@ -25,12 +21,11 @@ from app.metrics_collector import record_event_published, record_event_publish_f
 class EventPublisher:
     """Redis 事件发布器 — 持久化 + Pub/Sub + Stream 三通道。
 
-    采用 Outbox 模式（设计依据 §3.2）：
-    1. write_change_log() — 在当前 DB 事务内写 permission_changes（调用方负责 commit）
-    2. publish_to_redis() — 事务提交后异步发布 Redis Pub/Sub（实时通知）
-    3. publish_to_stream() — 事务提交后追加到 Redis Stream（持久化）
+    Outbox 模式：
+    1. write_change_log()  在当前 DB 事务内写 permission_changes，调用方负责 commit
+    2. publish_to_redis()  事务提交后发布 Pub/Sub
+    3. publish_to_stream() 事务提交后追加 Stream
     """
-
     CHANNEL = "visibility_changed"
     STREAM_KEY = "visibility_changed_stream"
     STREAM_MAXLEN = 100_000  # 近似裁剪上限
@@ -59,13 +54,9 @@ class EventPublisher:
         调用方负责 await db.commit() 提交事务。
         版本号在同一事务内递增，确保业务变更与事件日志原子提交。
 
-        project_id 是必填位置参数，由本方法统一写进 change_detail：
-        审计查询按 change_detail->>'project_id' 做项目隔离
-        （permission_changes 表没有独立的项目列），此前由各调用方自行放入，
-        ROLE_BOUND / ROLE_UNBOUND / RESTRICTION_* / OWNERSHIP_TRANSFERRED
-        四类事件漏放，项目级管理员的审计视图里这些记录直接不存在。
-        改成必填参数后，新增事件类型不可能再忘。
-        平台级变更传 None，表示不属于任何项目。
+        project_id 由本方法统一写进 change_detail —— permission_changes 没有独立的
+        项目列，审计查询按 change_detail->>'project_id' 做隔离。设为必填参数以保证
+        新增事件类型不会漏标。平台级变更传 None。
 
         Returns:
             (version, change_entry_id) — 供 publish_to_redis / publish_to_stream 使用。
@@ -171,9 +162,8 @@ class EventPublisher:
     ) -> str | None:
         """发布 VisibilityChanged 到 Redis Stream（持久化，支持断点续消费）。
 
-        P1-1 新增：与 Pub/Sub 并行发布。
-        Stream 保留最近 ~100,000 条消息，RAG subscriber 使用 Consumer Group
-        和 XREADGROUP 实现可靠消费。
+        Stream 保留最近约 100,000 条消息，订阅方通过 Consumer Group + XREADGROUP
+        实现可靠消费。
 
         Returns:
             Stream entry ID，失败返回 None。
@@ -210,10 +200,9 @@ class EventPublisher:
         change_detail: dict | None = None,
         unmounted: bool = False,
     ) -> None:
-        """双通道发布：Pub/Sub（实时通知）+ Stream（持久化）。
+        """双通道发布：Pub/Sub 实时通知 + Stream 持久化。
 
-        P1-1: 取代原有的 publish_to_redis() 作为推荐发布入口。
-        两个通道独立失败——Pub/Sub 失败不阻塞 Stream，反之亦然。
+        推荐的发布入口。两个通道独立失败，互不阻塞。
         """
         # Pub/Sub 路径（实时通知，低延迟）
         try:

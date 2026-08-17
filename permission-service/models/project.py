@@ -1,9 +1,8 @@
 """项目与客户端注册模型。
 
-Phase 1: 将硬编码注册表（ALLOWED_CLIENTS, _ALLOWED_AUDIENCES, SERVICE_API_KEY）
+将硬编码注册表（ALLOWED_CLIENTS, _ALLOWED_AUDIENCES, SERVICE_API_KEY）
 迁移到 DB 驱动，实现多项目独立权限平台的基础。
 
-设计依据：docs/权限管理系统架构设计.md §6.5 + 独立权限平台升级方案 Phase 1。
 """
 
 from datetime import datetime
@@ -98,7 +97,6 @@ class ProjectMember(Base):
     system_admin/admin 用户只能管理自己所属项目的资源。
     platform_admin 角色可管理全部项目（不受此表限制）。
 
-    设计依据：通用权限平台多项目隔离。
     """
     __tablename__ = "project_members"
 

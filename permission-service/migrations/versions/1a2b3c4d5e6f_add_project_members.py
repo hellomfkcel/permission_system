@@ -4,7 +4,7 @@ Revision ID: 1a2b3c4d5e6f
 Revises: ee7f3c8d5a1b
 Create Date: 2026-08-07
 
-Phase 4: 新增 project_members 表，实现管理员用户的项目级隔离。
+新增 project_members 表，实现管理员用户的项目级隔离。
 platform_admin 角色可管理全部项目，system_admin/admin 仅管理所属项目。
 """
 

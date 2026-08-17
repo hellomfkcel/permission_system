@@ -1,38 +1,26 @@
-"""Cerbos 策略解析器 — 策略结构的唯一索引 + 指纹缓存。
+"""Cerbos 策略解析器 — 策略结构索引 + 指纹缓存。
 
-设计依据：docs/permission_model_v2.md §3 数据来源边界。
+只回答结构性问题：有哪些角色、角色能执行哪些动作、角色由什么条件激活。
+不读授权记录，不参与运行时判定。
 
-职责边界（设计底线）：策略文件描述"结构"，DB 记录"事实"，Cerbos 做"决策"。
-本模块只回答结构性问题 —— 有哪些角色、角色能执行哪些动作、角色由什么条件激活。
-它不读任何授权记录，也不参与运行时判定。
+命名空间：
+    {root}/platform/{derived_roles,resource_policies}/*.yaml   平台层，全局可见
+    {root}/{project_id}/{...}/*.yaml                           项目层，仅该项目可见
+    {root}/{derived_roles,resource_policies}/*.yaml            无归属，全局可见
 
-┌─ 命名空间（修复：平台层文件混在项目目录 / 策略根目录）────────────────┐
-│  {root}/platform/{derived_roles,resource_policies}/*.yaml   平台层     │
-│  {root}/{project_id}/{...}/*.yaml                           项目层     │
-│  {root}/{derived_roles,resource_policies}/*.yaml            无归属（兼容）│
-│                                                                        │
-│  platform/ 与无归属目录对全部项目可见；项目目录只对该项目可见。         │
-└────────────────────────────────────────────────────────────────────────┘
+作用域：动作按 (角色, 命名空间) 二元索引。查询某项目时只合并该项目命名空间与
+全局命名空间，跨项目的动作不会串味。
 
-┌─ 作用域（修复：无策略项目显示其他项目的数据）──────────────────────────┐
-│  动作按 (角色, 命名空间) 二元索引。查询某项目时，只合并该项目命名空间   │
-│  与全局命名空间的动作 —— rag-v14 的 kb:read 不会出现在 demo-project 的  │
-│  角色权限里。                                                          │
-└────────────────────────────────────────────────────────────────────────┘
+角色语义：
+    identity  身份角色，Keycloak 侧的入场资格，只出现在 parentRoles 或规则的
+              roles 字段。
+    derived   派生角色，权限持有者，由 granted_actions 或 resource.attr.acl 激活。
 
-┌─ 角色语义（修复：把"激活"当成"继承"展示）────────────────────────────┐
-│  identity 身份角色  Keycloak 侧的入场资格，只出现在 parentRoles 或      │
-│                     规则的 roles 字段；本身不因"有子角色"而获得权限。   │
-│  derived  派生角色  真正的权限持有者，由 granted_actions 或             │
-│                     resource.attr.acl 激活。                           │
-│                                                                        │
-│  角色的有效权限 = 策略中直接授予它的动作，**不做 parentRoles 并集**。   │
-│  此前身份角色返回"所有以它为父的派生角色权限并集"，使 user 看起来持有   │
-│  全部权限，而派生角色反而更少 —— 那是把激活关系当成继承关系的结果。     │
-└────────────────────────────────────────────────────────────────────────┘
+角色的有效权限只计策略中直接授予它的动作，不做 parentRoles 并集 ——
+parentRoles 是激活条件而非权限继承。
 
-缓存：解析结果按策略目录指纹（文件路径 + mtime + 大小）缓存，指纹探测有最小
-间隔，超过 TTL 强制重新探测。带外改文件与跨进程写入都能被自动感知。
+缓存按策略目录指纹（路径 + mtime + 大小）失效，指纹探测有最小间隔，超过 TTL
+强制重新探测，可感知带外修改与跨进程写入。
 """
 
 from __future__ import annotations
@@ -44,10 +32,10 @@ from pathlib import Path
 
 import yaml
 
-# 无项目归属的策略在索引中的命名空间取值（历史布局，仍被识别）
+# 无项目归属的策略在索引中的命名空间取值
 UNSCOPED_PROJECT = ""
 
-# 平台层命名空间目录名。全局唯一，不随项目增减。
+# 平台层命名空间目录名
 PLATFORM_NAMESPACE = "platform"
 
 # 对全部项目可见的命名空间
@@ -107,7 +95,6 @@ class PolicyIndex:
 
     动作按 (名称, 命名空间) 索引，使同一角色名在不同项目中的动作互不串味。
     """
-
     # (role, namespace) → actions
     role_actions_scoped: dict[tuple[str, str], set[str]] = field(default_factory=dict)
     # (role, namespace) → 需要运行时授权记录才生效的动作子集
@@ -118,10 +105,9 @@ class PolicyIndex:
     resource_actions_scoped: dict[tuple[str, str], set[str]] = field(
         default_factory=dict
     )
-    # (派生角色, 命名空间) → parentRoles（激活它的身份角色，不是权限来源）
-    # 按命名空间索引：Cerbos 的派生角色定义归属于 derivedRoles 集合，
-    # 两个项目各定义一个同名角色是合法的（集合名不同），只按角色名单键会互相覆盖，
-    # 管理台就会把 A 项目角色的激活条件显示成 B 项目那一份。
+    # (派生角色, 命名空间) → parentRoles，即激活条件而非权限来源。
+    # 按命名空间索引：派生角色定义归属于 derivedRoles 集合，两个项目定义同名角色
+    # 是合法的（集合名不同），只按角色名单键会互相覆盖。
     derived_role_parents_scoped: dict[tuple[str, str], list[str]] = field(
         default_factory=dict
     )
@@ -168,12 +154,11 @@ class PolicyIndex:
         }
 
     def resources_owned_by(self, namespace: str) -> set[str]:
-        """返回**归属**于该命名空间的资源类型（不含全局可见的平台层资源）。
+        """返回归属于该命名空间的资源类型，不含全局可见的平台层资源。
 
-        与 visible_resources 的区别：可见 ≠ 可写。生成项目级策略时必须用本方法 ——
-        `platform` / `project_permission` 对每个项目都可见，但它们是平台层资源，
-        项目目录里不得出现它们的资源策略（否则与 platform/ 下的策略构成
-        同一个 Cerbos 模块 ID）。
+        与 visible_resources 的区别是可见与可写：平台层资源对每个项目都可见，
+        但项目目录里不得出现它们的资源策略，否则与 platform/ 下的策略构成
+        同一个 Cerbos 模块 ID。生成项目级策略须用本方法而非 visible_resources。
         """
         return {
             name
@@ -218,10 +203,9 @@ class PolicyIndex:
     def resource_layer(self, resource_type: str) -> str:
         """资源类型属于哪一层：platform / project / unknown。
 
-        授权记录必须与资源所在的层对齐：平台层资源（platform、
-        project_permission）的授权是平台级的（project_id IS NULL），
-        项目层资源的授权必须带项目。层级判断的唯一依据是策略文件所在的命名空间，
-        不在代码里维护第二份资源类型清单。
+        层级取自策略文件所在的命名空间，代码中不维护第二份资源类型清单。
+        授权记录须与层级对齐：平台层资源的授权 project_id 为 NULL，
+        项目层资源的授权必须带项目。
         """
         namespaces = self.resource_namespaces.get(resource_type)
         if not namespaces:
@@ -501,14 +485,10 @@ def get_resource_layer(resource_type: str) -> str:
 def get_role_effective_permissions(
     name: str, project_id: str | None = None
 ) -> list[str]:
-    """返回角色在指定项目作用域内的**有效权限**。
+    """返回角色在指定项目作用域内的有效权限。
 
-    取值只来自 Cerbos 策略文件（唯一权威源），且只算"策略直接授予该角色的动作"：
-
-    - 派生角色 → 资源策略中授予它的动作；
-    - 身份角色（user / system_admin / platform_viewer 等）→ 规则 roles 字段
-      直接授予它的动作。**不再把子派生角色的权限并集算给它** ——
-      parentRoles 是激活条件，不是权限继承，两者混同会让 user 显示成全权角色。
+    只计策略直接授予该角色的动作：派生角色取资源策略中授予它的动作，
+    身份角色取规则 roles 字段直接授予它的动作。不做 parentRoles 并集。
 
     与 acl_resolver 展开角色绑定时使用的映射同源。
     """
@@ -516,7 +496,7 @@ def get_role_effective_permissions(
 
 
 def describe_role(name: str, project_id: str | None = None) -> dict:
-    """返回角色的完整结构描述 —— 角色相关展示的唯一取值入口。
+    """返回角色的完整结构描述，角色相关展示的统一取值入口。
 
     Returns:
         {
@@ -562,8 +542,8 @@ def describe_role(name: str, project_id: str | None = None) -> dict:
 def parse_permissions_matrix(project_id: str | None = None) -> dict:
     """角色-权限矩阵。
 
-    每个角色名只出现一次（修复：同一角色因同时出现在 roles 与 parentRoles 中
-    被列为 cerbos / keycloak 两个条目，前端后写覆盖，矩阵列重复）。
+    每个角色名只出现一次：同名角色即使既出现在 roles 字段又被引作 parentRoles，
+    也合并为一条，由 kind 字段区分派生角色与身份角色。
 
     Returns:
         {

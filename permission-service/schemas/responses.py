@@ -1,7 +1,4 @@
-"""响应 Pydantic 模型。
-
-设计依据：docs/外部系统设计.md §2.4 API 设计。
-"""
+"""响应 Pydantic 模型。"""
 
 from pydantic import BaseModel, Field
 
@@ -25,7 +22,6 @@ class CheckBatchResult(BaseModel):
 class CheckBatchResponse(BaseModel):
     """POST /v1/check/batch 响应体。
 
-    设计依据：J-14 联合契约测试 — 逐资源独立决策，共享同一 request_id。
     任一条失败不影响其余；整批传输失败/超时 → 整批判否（fail-closed）。
     """
     results: list[CheckBatchResult] = Field(default_factory=list)

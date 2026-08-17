@@ -1,7 +1,5 @@
 /**
  * Auth Store — 管理台登录状态管理 + Token 自动刷新。
- *
- * 设计依据：docs/外部系统设计.md §3 + docs/frontend-design.md §0 认证与租户。
  */
 
 import { create } from "zustand";

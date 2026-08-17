@@ -1,7 +1,4 @@
-"""资源注册表 — 结构镜像的权威源。
-
-设计依据：docs/外部系统设计.md §2.3.1 resource_registry 表定义。
-"""
+"""资源注册表 — 结构镜像的权威源。"""
 
 import uuid
 from datetime import datetime

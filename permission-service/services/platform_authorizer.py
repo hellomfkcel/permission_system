@@ -1,19 +1,10 @@
-"""平台功能权限判定 — 唯一判定路径。
+"""平台功能权限判定。
 
-设计依据：docs/permission_model_v2.md §4 判定路径唯一化。
+角色 → 功能 → 动作的映射只写在 platform.yaml，运行时统一由 Cerbos 判定；
+本模块只负责把事实组装进请求，拿到结果后无条件遵从，不做二次推导：
 
-问题背景：平台功能（管理台侧边栏的 12 个模块）的准入此前有两套判断：
-  1. cerbos/policies/.../platform.yaml 里的策略；
-  2. api/auth_routes.py 里手写的 if 分支（platform_admin → 全部、
-     platform_viewer → 全部只读、platform_auditor → 三个模块……）。
-两套规则各自演进，策略模拟器给出的结论和管理台实际放行的结果可以不一致，
-改一处不改另一处就会产生"看得见但点不动"或反之的现象。
-
-本模块把第 2 套删掉：角色 → 功能 → 动作的映射只写在 platform.yaml 里，
-运行时统一由 Cerbos 判定。后端只负责把事实喂进去：
-  principal.roles                = JWT 角色 + 平台角色绑定（project_id IS NULL）
-  principal.attr.granted_actions = platform 资源的 ACL（按功能 ID 分组）
-拿到判定结果后无条件遵从，不做任何二次推导。
+    principal.roles                JWT 角色 + 平台角色绑定（project_id IS NULL）
+    principal.attr.granted_actions platform 资源的 ACL，按功能 ID 分组
 """
 
 from __future__ import annotations
@@ -36,13 +27,10 @@ _ACTIONS = sorted(PLATFORM_ACTIONS)
 
 
 class PlatformAuthorizationUnavailable(RuntimeError):
-    """Cerbos 不可达 —— 平台权限无法判定。
+    """Cerbos 不可达，平台权限无法判定。
 
-    调用方必须按 fail-closed 处理：拿不到判定就不放行，
-    不允许回退到本地推断，否则又出现第二条判断路径。
+    调用方须 fail-closed：拿不到判定就不放行，不得回退到本地推断。
     """
-
-
 def _principals_of(user_id: str) -> list[str]:
     return [f"user:{user_id}"]
 

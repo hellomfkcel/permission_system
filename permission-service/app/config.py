@@ -1,7 +1,4 @@
-"""权限服务后端 — 统一配置入口。
-
-设计依据：docs/外部系统设计.md §2.2 技术选型 + 实施方案 §0.3 环境变量一览。
-"""
+"""权限服务后端 — 统一配置入口。"""
 
 from pathlib import Path
 
@@ -118,15 +115,14 @@ class Settings(BaseSettings):
         "http://192.168.1.127:3002,http://localhost:3002"
     )
 
-    # ── 限流 ──
-    # 按端点差异化配置（设计依据：docs/RAG系统设计v14.md §24 容量规划）
+    # 限流：按端点差异化配置
     check_rate_limit: int = 1000       # /v1/check req/s
     check_batch_rate_limit: int = 500  # /v1/check/batch req/s
     filter_rate_limit: int = 500       # /v1/filter req/s
     prefilter_rate_limit: int = 500    # /v1/prefilter req/s
     visibility_rate_limit: int = 200   # /v1/visibility req/s — 盖戳管道高频调用
 
-    # ── TLS / HTTPS（P2-4：生产环境证书配置）──
+    # TLS / HTTPS
     # 开发环境默认不启用 TLS。生产环境通过环境变量配置：
     #   TLS_ENABLED=true
     #   TLS_CERT_FILE=/path/to/fullchain.pem
@@ -185,7 +181,7 @@ def get_cerbos_policies_dir() -> Path:
 
 # ── Secret file loading ──
 # Docker secrets / K8s Secret 挂载为文件，优先于环境变量中的明文值。
-# 设计依据：P2-3 生产安全 — 凭据禁止在 .env 中明文存放。
+# 凭据禁止在 .env 中明文存放。
 
 if settings.keycloak_client_secret_file:
     _secret_path = Path(settings.keycloak_client_secret_file)
@@ -229,9 +225,7 @@ if settings.keycloak_admin_password_file:
 
 
 # ══════════════════════════════════════════════════════════════
-# 生产安全启动检查（P1-2：凭据安全加固）
-# 设计依据：docs/外部系统设计.md §6.1 部署架构
-#          + docs/RAG系统设计v14.md §6A 外部契约调用规格
+# 生产安全启动检查
 # ══════════════════════════════════════════════════════════════
 
 def validate_production_secrets() -> list[str]:

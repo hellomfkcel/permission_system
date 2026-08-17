@@ -1,10 +1,5 @@
 /**
  * PermissionGrantDialog — 权限授予 Dialog 组件。
- *
- * 设计依据：docs/外部系统设计.md §3.4.1 权限授予 Dialog
- *          + docs/权限管理系统架构设计.md §2.1 动词目录（16 个 action）
- *
- * 支持：主体搜索、资源搜索、多 action 勾选、过期时间、批量授予。
  */
 
 "use client";
@@ -39,11 +34,10 @@ const RESOURCE_TYPE_LABELS_FALLBACK: Record<string, string> = {
   project_permission: "🗂 项目权限数据",
 };
 
-/** 平台层资源类型 —— 与 cerbos/policies/platform/resource_policies/ 下的策略对应。
+/** 平台层资源类型，其授权是平台级的（不带 project_id）。
  *
- * 这两类资源的授权是平台级的（不带 project_id）。后端以策略文件所在的命名空间为准
- * 做最终校验（acl_routes._validate_grant_scope），前端这份只用于决定表单是否要求
- * 选择项目 —— 判断错了会被后端 422 挡下，不会写出层级错位的记录。
+ * 仅用于决定表单是否要求选择项目；最终校验在后端按策略文件所在的命名空间进行
+ * （acl_routes._validate_grant_scope），此处判断有误会被 422 拒绝。
  */
 const PLATFORM_LAYER_RESOURCES = new Set(["platform", "project_permission"]);
 
@@ -270,10 +264,8 @@ export default function PermissionGrantDialog({
     if (!resourceId.trim()) return showToast("error", "请选择资源");
     if (selectedActions.length === 0) return showToast("error", "请至少选择一个权限");
 
-    // 授权记录的项目归属必须与资源所在的层对齐（docs/permission_model_v2.md §1）：
-    // 平台层资源（platform / project_permission）的授权是平台级的，不带 project_id；
-    // 项目层资源必须带当前项目。此前这里对项目 ID 有一个写死的兜底值，
-    // 平台功能的授权因此被挂到了那个项目名下，后端会把它当成平台级授权读出来。
+    // 授权记录的项目归属须与资源所在的层对齐：平台层资源不带 project_id，
+    // 项目层资源必须带当前项目
     const isPlatformLayer = PLATFORM_LAYER_RESOURCES.has(resourceType);
     const activeProject =
       currentProjectId && currentProjectId !== "__all__" ? currentProjectId : null;

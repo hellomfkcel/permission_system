@@ -1,8 +1,5 @@
 /**
  * Toast 通知组件 — 统一的用户提示系统。
- *
- * 设计依据：frontend-design.md §3.6 降级与错误状态处理。
- * 替换项目中所有 alert() 调用。
  */
 
 "use client";

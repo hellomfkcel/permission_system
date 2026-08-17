@@ -1,6 +1,4 @@
 /** 策略模拟器 — 使用 PolicySimulator 组件。
- *
- * 设计依据：docs/外部系统设计.md §3.4.2 策略模拟器 (Playground)
  */
 
 "use client";

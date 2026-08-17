@@ -1,7 +1,4 @@
-"""请求 Pydantic 模型。
-
-设计依据：docs/外部系统设计.md §2.4 API 设计。
-"""
+"""请求 Pydantic 模型。"""
 
 from pydantic import BaseModel, Field
 
@@ -72,7 +69,6 @@ class CheckBatchItem(BaseModel):
 class CheckBatchRequest(BaseModel):
     """POST /v1/check/batch 请求体。
 
-    设计依据：J-14 联合契约测试 — 批量端点对 interactive-backend 开放，
     单批 ≤200 条，逐资源独立决策。
     """
     request_id: str = Field(..., description="请求追踪 ID")

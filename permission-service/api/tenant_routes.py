@@ -1,7 +1,4 @@
-"""租户管理 API — CRUD + 成员管理。
-
-设计依据：docs/tenant_design.md §3.2 API 设计。
-"""
+"""租户管理 API — CRUD + 成员管理。"""
 
 import uuid
 from datetime import datetime, timezone

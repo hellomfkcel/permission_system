@@ -1,7 +1,5 @@
 """联合契约测试 (Joint Contract Tests) — RAG v14 × 权限服务。
 
-设计依据：docs/RAG系统设计v14.md §27.2【联合契约测试】与权限服务双侧参与（20 项）。
-
 运行方式：
     conda activate perm_service
     cd ~/permission-system/permission-service
@@ -93,7 +91,6 @@ def _unique_id(prefix: str) -> str:
 
 class ContractTester:
     """联合契约测试辅助类。"""
-
     def __init__(self, base_url: str = BASE_URL):
         self.base = base_url
         self.client = httpx.Client(timeout=30.0)
@@ -418,7 +415,7 @@ def test_J15_prefilter_accepts_ctx_token(t: ContractTester):
     # 用 ctx_token 调 prefilter
     pf = t.prefilter(ctx_token)
 
-    # 不应该报错（之前返回 401 Invalid credential）
+    # 不应报错
     assert "detail" not in pf, (
         f"J-15 FAIL: prefilter rejected ctx_token. Got: {pf}"
     )
@@ -747,7 +744,6 @@ def test_J14_check_batch_endpoint(t: ContractTester):
 def test_J8_kb_grant_propagates_to_all_linked_docs(t: ContractTester):
     """J-8: KB 粒度授权后，该 KB 下所有已链接文档的 visibility 应反映新戳记。
 
-    设计依据：
     - docs/RAG系统设计v14.md §14.5.4：KB 粒度授权变更后，
       权限服务应对该 KB 下所有 (doc, kb) 通道更新可见性投影。
     - 本测试验证：grant KB 级权限 → 该 KB 下多个文档的 visibility
@@ -794,7 +790,6 @@ def test_J8_kb_grant_propagates_to_all_linked_docs(t: ContractTester):
 def test_J9_revoked_acl_results_in_deny(t: ContractTester):
     """J-9: 回收后的 ACL 条目应立即失去效力。
 
-    设计依据：
     - docs/外部系统设计.md §2.3.1 acl_entries 表定义：revoked 字段
     - acl_resolver.py 中的 WHERE 条件：revoked == false
     - 回收后的 ACL 不应出现在 prefilter.kbs 和 visibility.allow_stamps 中
@@ -862,7 +857,6 @@ def test_J9_revoked_acl_results_in_deny(t: ContractTester):
 def test_J19_concurrent_operations_monotonic_version(t: ContractTester):
     """J-19: 连续的 grant → revoke → grant 操作应产生严格单调递增的版本号。
 
-    设计依据：
     - docs/外部系统设计.md §2.3.2 全局版本号
     - global_permission_version SEQUENCE 在每次 ACL 变更时递增
     - 盖戳管道的版本单调性检查依赖此保证（§14.5.3 第3条）
@@ -935,7 +929,6 @@ def test_J19_concurrent_operations_monotonic_version(t: ContractTester):
 def test_J20_event_persistence_in_permission_changes(t: ContractTester):
     """J-20: 所有 ACL/角色/生命周期变更必须持久化到 permission_changes 表。
 
-    设计依据：
     - docs/外部系统设计.md §5.2 事件可靠性保证
     - 事件持久化在 permission_changes 表中，即使 Redis 不可达也能通过 DB 对账恢复。
     - 本测试验证：grant → 查询 permission_changes 确认事件记录存在。
@@ -995,7 +988,6 @@ def test_J20_event_persistence_in_permission_changes(t: ContractTester):
 
 # ══════════════════════════════════════════════════════════════
 # J-21: 文档级 ACL 走 ACL 路精确生效，且不放大成 KB 级权限
-# 设计依据：docs/permission_model_v2.md §1 三种授权模式 / §4 判定路径唯一化
 # ══════════════════════════════════════════════════════════════
 
 def test_J21_document_acl_is_precise(t: ContractTester):

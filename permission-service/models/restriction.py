@@ -1,7 +1,4 @@
-"""限制表 — 封禁/阻断规则。
-
-设计依据：docs/外部系统设计.md §2.3.1 restrictions 表定义。
-"""
+"""限制表 — 封禁/阻断规则。"""
 
 import uuid
 from datetime import datetime

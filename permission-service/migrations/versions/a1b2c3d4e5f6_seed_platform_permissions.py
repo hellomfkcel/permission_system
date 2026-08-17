@@ -5,7 +5,6 @@ Revises: 2b3c4d5e6f7a
 Create Date: 2026-08-07
 
 Phase 1b: 种子数据 — 平台级角色定义 + admin 用户的平台权限 ACL + 角色绑定。
-设计依据：docs/权限管理系统架构设计.md — 平台级权限管理。
 """
 
 from alembic import op

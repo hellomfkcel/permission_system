@@ -1,7 +1,4 @@
-"""ACL 表 — 权限授予记录。
-
-设计依据：docs/外部系统设计.md §2.3.1 acl_entries 表定义。
-"""
+"""ACL 表 — 权限授予记录。"""
 
 import uuid
 from datetime import datetime

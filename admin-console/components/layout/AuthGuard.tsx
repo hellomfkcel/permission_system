@@ -4,9 +4,6 @@
  * 检查用户是否已登录（有效的 JWT token）且具有管理员角色（system_admin 或 admin）。
  * 未登录 → 重定向到 /login；已登录但非管理员 → 显示"无权限"页面。
  * 登录页本身 (/login, /auth/callback) 不需要保护。
- *
- * 设计依据：frontend-design.md §0 认证与租户
- *          + docs/权限管理系统架构设计.md §2.2 角色层级。
  */
 
 "use client";
