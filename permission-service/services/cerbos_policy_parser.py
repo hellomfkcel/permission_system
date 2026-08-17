@@ -277,6 +277,37 @@ def get_resource_actions_map(project_id: str | None = None) -> dict[str, list[st
     return {name: sorted(index.resource_actions[name]) for name in names}
 
 
+def get_role_effective_permissions(
+    name: str, project_id: str | None = None
+) -> list[str]:
+    """返回角色在策略文件中的**有效权限**（含身份角色的继承并集）。
+
+    取值只来自 Cerbos 策略文件（唯一权威源）：
+    - 派生角色（策略中直接出现）：直接返回其 role_actions；
+    - 父角色（被派生角色 parentRoles 引用，如 Keycloak 身份角色 system_admin/user）：
+      所有以其为 parentRole 的派生角色权限的**并集**。
+
+    与 acl_resolver 展开角色绑定时使用的映射同源。
+    修复：此前 /definitions 对身份角色硬编码返回 []，管理台显示"无权限"，
+    但判定链路（system_admin → admin 派生角色）实际授予全部权限 —— 展示与判定脱节。
+    """
+    index = get_policy_index()
+    visible = index.visible_roles(project_id)
+
+    # 1. 角色本身就是策略中的派生角色 → 直接取其动作
+    if name in visible:
+        return sorted(index.role_actions[name])
+
+    # 2. 角色是被引用的父角色（身份角色）→ 以其为父的派生角色权限并集
+    union: set[str] = set()
+    for derived_name, parents in index.derived_role_parents.items():
+        if derived_name not in visible:
+            continue
+        if name in parents:
+            union.update(index.role_actions.get(derived_name, set()))
+    return sorted(union)
+
+
 def parse_permissions_matrix(project_id: str | None = None) -> dict:
     """角色-权限矩阵。
 
@@ -310,20 +341,19 @@ def parse_permissions_matrix(project_id: str | None = None) -> dict:
             "project_id": index.role_project.get(name, UNSCOPED_PROJECT),
         })
 
-    # Keycloak 身份角色的权限 = 以其为 parentRole 的派生角色权限并集
-    parent_perms: dict[str, set[str]] = {}
+    # 父角色（Keycloak 身份角色等）的权限 = 以其为 parentRole 的派生角色权限并集
+    # 复用 get_role_effective_permissions 保证与 /definitions 展示同源（单一权威）。
+    parent_names: set[str] = set()
     for derived_name, parents in index.derived_role_parents.items():
         if derived_name not in visible:
             continue
-        for parent in parents:
-            parent_perms.setdefault(parent, set())
-            parent_perms[parent].update(index.role_actions.get(derived_name, set()))
+        parent_names.update(parents)
 
-    for parent in sorted(parent_perms):
+    for parent in sorted(parent_names):
         roles_list.append({
             "name": parent,
             "parent_keycloak_roles": [],
-            "permissions": sorted(parent_perms[parent]),
+            "permissions": get_role_effective_permissions(parent, project_id),
             "source": "keycloak",
             "project_id": UNSCOPED_PROJECT,
         })

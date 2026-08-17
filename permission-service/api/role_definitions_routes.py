@@ -24,6 +24,7 @@ from api.auth_routes import (
 from schemas.responses import Principal
 from services.cerbos_policy_parser import (
     get_policy_index,
+    get_role_effective_permissions,
     invalidate_role_actions_cache,
     parse_permissions_matrix,
 )
@@ -86,17 +87,18 @@ class UpdateRoleRequest(BaseModel):
 
 
 def _role_permissions(name: str, project_id: str | None) -> list[str]:
-    """返回角色的权限列表。
+    """返回角色的**有效权限**列表（含身份角色的继承并集）。
 
-    取值只来自策略索引，与 acl_resolver 展开角色绑定时使用的映射一致。
-    Keycloak 身份角色不展示权限（其权限由继承它的派生角色决定）。
+    取值只来自 Cerbos 策略文件（唯一权威源）：
+    - 派生角色（admin/kb_reader 等）→ 策略中声明的动作；
+    - Keycloak 身份角色（system_admin/user 等被 parentRoles 引用的角色）
+      → 所有以其为父的派生角色权限的**并集**。
+
+    修复：此前对身份角色硬编码返回 []，管理台显示"无权限"，但判定链路
+    （system_admin → admin 派生角色）实际授予全部权限 —— 展示与判定脱节。
+    现在展示 = 策略解析出来的有效权限，与判定同源。
     """
-    if name in _KEYCLOAK_IDENTITY_ROLES:
-        return []
-    index = get_policy_index()
-    if name not in index.visible_roles(project_id):
-        return []
-    return sorted(index.role_actions[name])
+    return get_role_effective_permissions(name, project_id)
 
 
 def _to_out(
@@ -410,8 +412,9 @@ async def get_permissions_matrix(
 
     - project_id 指定 → 该项目的角色加无项目归属的角色
     - project_id 不传 → 全部项目
-    仅包含策略中直接出现的角色，不含 Keycloak 身份角色。
+    矩阵同时包含策略中直接出现的派生角色（source=cerbos）与 Keycloak 身份角色
+    （source=keycloak，权限为其继承的派生角色并集）——与 /definitions 展示同源，
+    保证"以策略文件为准，解析出来是什么就是什么"，消除 system_admin 显示无权限的误导。
     """
     matrix = parse_permissions_matrix(project_id or None)
-    matrix["roles"] = [r for r in matrix["roles"] if r.get("source") != "keycloak"]
     return PermissionMatrixOut(**matrix)
