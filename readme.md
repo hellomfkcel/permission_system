@@ -8,6 +8,8 @@
 
 设计依据：`docs/外部系统设计.md`、`docs/外部系统实施方案.md`、`docs/权限管理系统架构设计.md`、`docs/tenant_design.md`、`docs/manage_role_design.md`、`docs/cerbos-policy-gray-release.md`。
 
+权限模型以 `docs/permission_model_v2.md` 为准（三层授权 + 单一数据来源），其诊断与整改过程记录在 `docs/rag_permission_service_diagnose_v14.md`。该模型取代了 `docs/manage_role_design.md` 中"角色权限双写"的部分，历史诊断报告 v1–v13 中关于策略目录布局与角色权限来源的描述同样以 v2 为准。
+
 ## 1. 职责边界
 
 | 能力 | 归属 | 说明 |
@@ -702,11 +704,12 @@ permission-service/          权限服务后端 (FastAPI)
 admin-console/               管理台前端 (Next.js 14)
 perm-service-client/         通用接入 SDK
 cerbos/policies/
+├── platform/                平台层，全局唯一、不随项目增减
+│   └── resource_policies/   platform.yaml（功能模块入口）
+│                            project_permission.yaml（项目权限数据操作）
 ├── rag-v14/                 首个接入项目：知识库与文档模型，属性注入式
 ├── demo2/                   OA 场景项目：请假、报销、绩效等，静态角色式
-├── demo3/                   通用文档项目，静态角色式
-├── derived_roles/           无项目归属的派生角色（平台角色 + 平台级自定义角色）
-└── resource_policies/       无项目归属的资源策略（platform 功能策略）
+└── demo3/                   通用文档项目，静态角色式
 docs/                        设计文档与诊断记录
 scripts/                     运维脚本
 docker-compose.yml           权限服务、管理台、PostgreSQL、Redis
@@ -774,6 +777,13 @@ docker-compose.keycloak.yml  Keycloak
 | 平台角色绑定对静态角色式项目不生效 | 适用的角色绑定并入 Cerbos `principal.roles`，匹配 `roles` 字段的策略可消费平台侧绑定 |
 | `system_admin` 通过认证与平台权限检查后被项目范围拒绝 | `get_project_scope` 与 `get_admin_project_ids` 改为与 `get_current_admin`、`require_platform_permission` 同口径处理 `platform_admin` / `system_admin` / `admin` |
 | 指标无项目维度 | `authz_decision_total`、`authz_call_failed_total` 增加 `project` 标签 |
+| 自定义角色可对平台层资源生成策略，生成物与平台策略同 Cerbos 模块 ID | 只允许对本项目自有资源类型生成规则；自定义角色必须归属项目 |
+| 自定义角色的派生角色集合名全项目共用 `custom_roles` | 改为 `custom_roles_{project}`，写入时自动改写引用旧名的遗留文件 |
+| `mount_registry` 无 `project_id`，唯一约束全局 | 加列 + 唯一约束改 `(project_id, doc_id, kb_id)`，link/unlink/retire/visibility/prefilter 全部按项目过滤 |
+| 生命周期端点信任请求体的 `project_id` | 项目以凭据（API key + client_id）为准，请求体只能复述，不一致返回 403 |
+| `platform` 资源的授权记录可挂在项目下并升级为平台权限 | 授权层级按资源所在的策略命名空间校验，平台层授权必须 `project_id IS NULL` |
+| `/api/v1/policies*` 不校验项目范围 | 加命名空间访问控制：平台层与策略根目录仅平台管理员可写；列表按可见范围过滤；模块 ID 冲突 409 |
+| 审计事件的项目标记靠各调用方自觉写入 | `write_change_log` 的 `project_id` 改为必填参数，在唯一入口统一写进 `change_detail` |
 
 ### 17.3 解耦
 
