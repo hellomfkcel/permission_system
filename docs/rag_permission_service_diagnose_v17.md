@@ -3,7 +3,8 @@
 > 测试日期：2026-08-17
 > 环境：真实全栈（PostgreSQL + Redis + Cerbos PDP + FastAPI service），不 mock、不硬编码、
 > 不为跑通绕过架构。所有判定都走真实链路（Cerbos 判定 + DB 授权数据 + 中间件准入）。
-> 承接 v16（G1–G4 修复）。本轮在联调中新发现并修复三处越权缺陷 **G5 / G6 / G7**。
+> 承接 v16（G1–G4 修复）。本轮在联调中新发现并修复越权缺陷 **G5 / G6 / G7 / G8**，
+> 并针对其共性根因加了一道结构性静态门禁（第十节）。
 
 ## 一、测试环境与夹具
 
@@ -332,3 +333,110 @@ project_id 存于 `change_detail` JSONB（与审计查询同源）。抽出共�
 回归：审计查询 `GET /audit` 经共享构造器重构后范围不变（palice 仅 rag-v14、bob 仅
 demo2、admin 全量、palice 显式 demo2→403）。`py_compile` 通过；测试播种数据经真实 API
 清理。**G7 修复完成，重放不再存在跨项目问题。**
+
+---
+
+## 十、根因追问 —— "模块级准入通过、项目级校验缺失"是什么问题，能不能系统修
+
+用户在 G5–G7 后追问：这类问题到底是什么性质，联调为什么发现不了、修不彻底？本节回答，
+并把"逐个打补丁"升级为"结构性门禁 + 穷举审计"。
+
+### 10.1 问题的性质：两个正交维度，强制力不对称
+
+授权有两个正交维度，每个数据端点都要同时过：
+
+1. **模块准入**（能不能进这个模块）—— 由 `require_platform_permission(feature, action)` 等
+   **强制声明式依赖**把守，写在函数签名里，不写就没有认证，**忘不掉**。
+2. **项目/层级范围**（能不能操作这个项目、这一层的数据）—— 长期靠每个端点**手写内联校验**
+   （`scope.can_access` / JSONB 过滤 / 命名空间校验），散落各处，**极易漏写**。
+
+G5–G8 都是同一个结构性缺陷的症状：**维度 1 有单一强制点，维度 2 没有**。写端点当初记得手写、
+读端点忘了，就成了"模块级准入通过、但项目级校验缺失"。这不是几个编码 bug，是架构层面
+缺一个统一强制点。
+
+### 10.2 为什么联调不足以修这一类
+
+联调**能**发现（本轮发现了四个），但结构上**不足以**根治：
+
+- 测试只能证明**被测路径上有 bug**，证明不了**未测路径上没有 bug**。
+- 空间是组合爆炸：端点 N × 角色 M × 项目 K ×（显式 project_id / 隐式 / 路径 / body / 资源反查）。
+  抽样命中几个，剩下取决于恰好测了哪些组合。
+- 逐个打补丁 = 打地鼠。正确做法是**穷举 + 把"易漏"变成"漏了就红"**。
+
+### 10.3 G8 —— 穷举审计立刻暴露的一大片（联调完全没碰到）
+
+静态穷举所有路由后，`project_routes.py` 一整片项目基础设施端点只挂 `get_current_admin`
+（而 `get_current_admin` 对**任意项目的任意成员**都放行），既无平台守卫也无项目范围校验：
+
+| 端点 | 原守卫 | 真实栈复现（palice=rag-v14 管理员 打 demo2）|
+| --- | --- | --- |
+| POST `/{pid}/api-keys` | get_current_admin | **201 铸出 demo2 的 API Key** |
+| GET `/{pid}/api-keys` | get_current_admin | 200 列出 demo2 全部 key |
+| POST/DELETE `/{pid}/clients` | get_current_admin | 201/204 改 demo2 的 client 注册 |
+| POST/DELETE `/{pid}/audiences` | get_current_admin | 201/204 改 demo2 的 audience |
+| DELETE `/{pid}/members/{uid}` | require_project_member（缺 admin 判定）| 只读成员即可删他人 |
+
+其中**铸 API Key 是最严重的**：API Key 是 `/v1` 外部鉴权凭证。实测 palice 用铸出的 demo2 key
+配注入的 demo2 client 调 `POST /v1/check`，返回 200 真实判决 —— 即以 demo2 身份进入判定链路，
+**跨项目完整攻陷外部鉴权面**。连**只读成员 pviewer** 也能给 rag-v14 铸 key（201）。
+
+联调（测试 1–5）完全没碰这片端点，因此一个都没发现；穷举审计一次全暴露。
+
+**修复**（按 0.1/0.2 分类，`project_mgmt` 属平台专属）：
+
+- provisioning **变更**（建/删 client、签发/吊销 API Key、建/删 audience）→ `require_platform_admin`
+  （project_mgmt:write）。签发凭证是平台级 provisioning，项目成员不得自签，杜绝为别项目铸凭证。
+- provisioning **读取**（列 API Key/audience）→ `require_project_member`，限本项目、不返回明文 key。
+- `remove_project_member` 补上与 `add_project_member` 同口径的 `project_admin` 判定。
+
+复测：palice 打 demo2 全部 403；pviewer 建 key/改 client 403；palice 给**本项目**铸 key 也 403
+（provisioning 平台专属）；项目成员可读本项目 key 列表（200）；平台管理员照常 provisioning（201）。
+
+### 10.4 结构性门禁：`tests/test_authz_scope_guard.py`
+
+把"项目级校验易漏"变成"漏了就 CI 红"。纯静态源码解析（不起服务、不连库），穷举所有路由
+处理函数，两道检查：
+
+1. **零强制**：凡触及项目级数据（带 project_id 形参，或引用带 project_id 列的模型）的端点，
+   必须出现至少一个范围/权属强制标记（assert_project_scope / require_project_member /
+   require_platform_admin / _caller_project / …）。→ 抓 G7/G8 那种整段没守卫的形态。
+2. **显式 project_id 未校验**：凡签名里出现调用方直接提交的 `project_id`（Query/Form），必须出现
+   **主动**校验标记（assert_project_scope / can_access / _assert_namespace_access / …），而不能只有
+   `is_platform_admin`/`filter_condition` 这类被动过滤。→ 抓 G5/G6 那种"某分支有范围逻辑、但显式
+   project_id 分支绕过"的形态。
+
+豁免走显式 `ALLOWLIST`，每条注明理由（平台专属 / 服务鉴权 / 无状态 / 公开），并有第三个测试
+防止 ALLOWLIST 残留失效条目。**新增端点漏了项目校验，这三个测试直接红。**
+
+**门禁当场又抓出一个联调与人工穷举都漏掉的 G5 实例**：`acl_routes.py::get_effective_permissions`
+——`if project_id:` 分支直接落过滤、未 `assert_project_scope`，palice 可读 demo2 的有效权限。
+已修复并复测（palice demo2→403、本项目→200、admin→200）。这正是结构性门禁优于人工审查的证明：
+人工"穷举"仍漏了一个，静态门禁没漏。
+
+### 10.5 本轮范围收口总账（真实栈四主体，HTTP 状态码）
+
+```
+端点(除注明外均 rag-v14)                     admin  palice  pviewer  bob(demo2)
+GET  acl/effective?rag-v14                    200    200     403      403
+GET  acl/effective?demo2   [跨项目]           200    403     403      200
+GET  auth/stats?demo2      [跨项目]           200    403     403      200
+GET  auth/users?demo2      [跨项目]           200    403     403      200
+GET  auth/recent-changes?demo2 [跨项目]       200    403     403      200
+GET  projects/demo2/api-keys [跨项目]         200    403     403      200
+POST projects/demo2/api-keys [铸凭证]         201    403     403      403
+POST projects/rag-v14/api-keys [本项目铸凭证] 201    403     403      403
+```
+
+### 10.6 结论
+
+"模块级准入通过、项目级校验缺失"是一个**横切关注点缺乏统一强制点**的架构问题，不是若干孤立
+bug。联调只能抽样发现症状（G5/G6/G7），穷举静态审计才暴露出最严重的一片（G8 铸凭证跨项目攻陷），
+而**结构性门禁**把这一类从"靠记性"变成"漏了就红"，并当场再抓出一个人工漏掉的实例
+（get_effective_permissions）。
+
+三道防线各司其职：Cerbos 判定管模块准入（维度 1），`assert_project_scope`/`require_*` 管项目与
+层级（维度 2），`test_authz_scope_guard.py` 管"维度 2 别再漏写"。离线静态测试合计 24 项全过。
+
+遗留设计点（待用户确认，非安全阻断）：provisioning（API Key/client/audience）现按 `project_mgmt`
+平台专属处理，项目管理员不能自助签发本项目凭证，需平台管理员代办。若要放开项目管理员自助，
+可把这几个变更端点从 `require_platform_admin` 调整为"项目管理员 + 本项目范围"，属设计取舍。
