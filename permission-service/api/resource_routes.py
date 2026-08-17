@@ -9,7 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from models.resource import ResourceRegistry
-from api.auth_routes import get_current_admin, get_project_scope, ProjectScope, require_platform_permission
+from api.auth_routes import (
+    assert_project_scope,
+    get_current_admin,
+    get_project_scope,
+    ProjectScope,
+    require_platform_permission,
+)
 from schemas.responses import Principal
 from services.event_publisher import get_event_publisher
 
@@ -51,6 +57,7 @@ async def list_resources(
 
     # 项目范围过滤
     if project_id:
+        assert_project_scope(scope, project_id)
         conditions.append(ResourceRegistry.project_id == project_id)
     elif not scope.is_platform_admin:
         scope_filter = scope.filter_condition(ResourceRegistry)
@@ -104,6 +111,7 @@ async def transfer_ownership(
     body: TransferOwnershipRequest,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
     _perm: None = Depends(require_platform_permission("resource_mgmt", "platform:write")),
 ) -> TransferResult:
     """转移资源所有权（需要管理员认证）。"""
@@ -116,6 +124,8 @@ async def transfer_ownership(
 
     if not resource:
         raise HTTPException(status_code=404, detail="Resource not found")
+
+    assert_project_scope(scope, resource.project_id)
 
     previous_owner = resource.owner
     resource.owner = body.new_owner
@@ -173,6 +183,7 @@ async def get_resource_owners(
     resource_id: str,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
     _perm: None = Depends(require_platform_permission("resource_mgmt", "platform:read")),
 ) -> ResourceOwnerResponse:
     """查询资源所有者信息（管理台 API，需管理员认证）。
@@ -191,6 +202,8 @@ async def get_resource_owners(
 
     if not resource:
         raise HTTPException(status_code=404, detail="resource not found")
+
+    assert_project_scope(scope, resource.project_id)
 
     return ResourceOwnerResponse(
         resource_type=resource.resource_type,

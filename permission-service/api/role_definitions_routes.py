@@ -22,7 +22,8 @@ from app.database import get_db
 from models.role_definition import RoleDefinition
 from models.role_binding import RoleBinding
 from api.auth_routes import (
-    get_current_admin, get_project_scope, ProjectScope, require_platform_permission,
+    assert_project_scope, get_current_admin, get_project_scope, ProjectScope,
+    require_platform_permission,
 )
 from schemas.responses import Principal
 from services.cerbos_policy_parser import (
@@ -200,6 +201,7 @@ async def list_role_definitions(
     stmt = select(RoleDefinition)
 
     if project_id:
+        assert_project_scope(scope, project_id)
         stmt = stmt.where(
             or_(
                 RoleDefinition.project_id == project_id,
@@ -232,12 +234,16 @@ async def get_role_definition(
     ),
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("role_mgmt", "platform:read")),
 ) -> RoleDetailOut:
     """获取单个角色详情。需要管理员认证。
 
     权限按 project_id 指定的作用域解析，与列表页取值同源；不传时退回角色
     自身的 project_id（平台级角色即全局视图）。
     """
+    assert_project_scope(scope, project_id)
+
     result = await db.execute(
         select(RoleDefinition).where(RoleDefinition.name == name)
     )
@@ -245,9 +251,9 @@ async def get_role_definition(
     if r is None:
         raise HTTPException(status_code=404, detail=f"Role not found: {name}")
 
-    scope = project_id or r.project_id
-    counts = await _binding_counts(db, [name], scope)
-    return RoleDetailOut(**_to_out(r, counts.get(name, 0), scope).model_dump())
+    scope_project = project_id or r.project_id
+    counts = await _binding_counts(db, [name], scope_project)
+    return RoleDetailOut(**_to_out(r, counts.get(name, 0), scope_project).model_dump())
 
 
 @router.post("/definitions", response_model=RoleDefOut, status_code=201)
@@ -447,14 +453,25 @@ async def delete_role_definition(
 async def get_permissions_matrix(
     project_id: str | None = Query(None, description="项目 ID，不传则返回全部"),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("permission_mgmt", "platform:read")),
 ) -> PermissionMatrixOut:
     """获取角色-权限矩阵（从 Cerbos 策略解析）。需要管理员认证。
 
     - project_id 指定 → 该项目的角色加无项目归属的角色
-    - project_id 不传 → 全部项目
+    - project_id 不传 → 平台管理员看全部项目；项目管理员必须显式指定项目
     矩阵同时包含策略中直接出现的派生角色（source=cerbos）与 Keycloak 身份角色
     （source=keycloak，权限为其继承的派生角色并集）——与 /definitions 展示同源，
     保证"以策略文件为准，解析出来是什么就是什么"，消除 system_admin 显示无权限的误导。
     """
+    if project_id:
+        assert_project_scope(scope, project_id)
+    elif not scope.is_platform_admin:
+        # 不传 project_id 会解析全部项目矩阵；非平台管理员必须限定到具体项目，
+        # 否则等于跨项目取数。
+        raise HTTPException(
+            status_code=400,
+            detail="project_id is required for non-platform administrators.",
+        )
     matrix = parse_permissions_matrix(project_id or None)
     return PermissionMatrixOut(**matrix)

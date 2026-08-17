@@ -17,7 +17,7 @@ from models.role_definition import RoleDefinition
 from services.jwt_parser import parse_principal
 from services.cerbos_adapter import get_cerbos
 from services.event_publisher import get_event_publisher
-from api.auth_routes import get_current_admin, get_project_scope, ProjectScope, require_platform_permission
+from api.auth_routes import assert_project_scope, get_current_admin, get_project_scope, ProjectScope, require_platform_permission
 from schemas.responses import Principal
 
 logger = structlog.get_logger(__name__)
@@ -127,6 +127,7 @@ async def list_audit_entries(
 
     # 项目范围过滤
     if project_id:
+        assert_project_scope(scope, project_id)
         conditions.append(
             PermissionChange.change_detail["project_id"].astext == project_id
         )
@@ -166,6 +167,7 @@ async def list_audit_entries(
 async def simulate(
     body: SimulateRequest,
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
     _perm: None = Depends(require_platform_permission("playground", "platform:read")),
 ) -> SimulateResult:
     """策略模拟器 — 走真实 ACL + 角色绑定 + 封禁查询链路的权限判定。需要管理员认证。
@@ -174,7 +176,18 @@ async def simulate(
     get_resource_acl + check_subject_ban + get_resource_attr），
     确保模拟结果反映实际权限数据，而非仅原始 Cerbos 策略。
 
+    模拟器读取的是真实授权数据，因此和其它读端点一样要按项目范围收口：项目管理员
+    只能在自己项目里模拟，不能借模拟器跨项目取数；跨项目查询（不传 project_id）仅
+    对平台管理员开放。
     """
+    if body.project_id:
+        assert_project_scope(scope, body.project_id)
+    elif not scope.is_platform_admin:
+        raise HTTPException(
+            status_code=400,
+            detail="project_id is required for non-platform administrators.",
+        )
+
     from app.database import async_session
     from services.acl_resolver import (
         resolve_granted_actions,
