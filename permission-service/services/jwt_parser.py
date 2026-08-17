@@ -5,7 +5,6 @@
 2. ctx_token（RAG worker 异步任务携带的上下文令牌）
 
 ctx_token 解析逻辑与 api/context.py 的 verify_ctx_token 保持同步。
-设计依据：docs/外部系统设计.md §2.5.1 + docs/RAG系统设计v14.md §6A.5 + J-15。
 """
 
 import base64
@@ -97,7 +96,6 @@ def parse_principal(credential: str) -> Principal:
 
     当 credential 以 "ctx." 开头时，视为 ctx_token——
     先从中提取原始 JWT，再继续正常的 JWT 解析流程。
-    设计依据：docs/RAG系统设计v14.md §6A.5（prefilter 接受 ctx_token，J-15）。
 
     包含: user_id, roles, groups, tenant_id, principals 展开。
 

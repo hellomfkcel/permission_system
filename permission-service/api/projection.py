@@ -1,7 +1,4 @@
-"""投影面 API — GET /v1/prefilter + POST /v1/visibility。
-
-设计依据：docs/外部系统设计.md §2.4.2 投影面 API + 实施方案步骤 4.1/4.2。
-"""
+"""投影面 API — GET /v1/prefilter + POST /v1/visibility。"""
 
 from datetime import datetime, timezone
 

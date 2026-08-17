@@ -1,7 +1,4 @@
-"""管理台 API — 角色绑定管理。
-
-设计依据：docs/外部系统设计.md §2.4.4 管理台专用 API。
-"""
+"""管理台 API — 角色绑定管理。"""
 
 import uuid
 
@@ -103,7 +100,7 @@ async def bind_role(
     )
     db.add(binding)
 
-    # ★ Outbox 模式（设计依据 §3.2）：
+    # Outbox 模式：
     # 在同一事务内写角色绑定 + permission_changes，原子提交
     publisher = get_event_publisher()
     version, change_id = await publisher.write_change_log(
@@ -178,7 +175,7 @@ async def unbind_role(
 
     binding.revoked = True
 
-    # ★ Outbox 模式（设计依据 §3.2）：
+    # Outbox 模式：
     # 在同一事务内写角色解绑 + permission_changes，原子提交
     publisher = get_event_publisher()
     version, change_id = await publisher.write_change_log(

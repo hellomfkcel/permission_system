@@ -4,13 +4,12 @@ Revision ID: 2b3c4d5e6f7a
 Revises: 1a2b3c4d5e6f
 Create Date: 2026-08-07
 
-Phase 5: 为核心权限表添加 project_id 列，实现项目级数据隔离。
+为核心权限表添加 project_id 列，实现项目级数据隔离。
 - acl_entries, role_bindings, restrictions, resource_registry: NOT NULL, default 'rag-v14'
 - role_definitions: NULLABLE (平台级角色不绑项目)
 - 回填已有数据的 project_id = 'rag-v14'
 - 新增 (project_id, ...) 复合索引
 
-设计依据：权限平台项目级隔离系统性优化方案 Step 1。
 """
 
 from alembic import op

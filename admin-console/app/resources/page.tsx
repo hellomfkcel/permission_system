@@ -1,7 +1,4 @@
 /** 资源管理 — KB/文档列表 + 详情面板（ACL/角色绑定）。
- *
- * 设计依据：docs/外部系统设计.md §3.3 页面结构 + §3.4.1 权限授予 Dialog
- *          + docs/frontend-design.md §3.4.3 管理台跳转入口对接。
  */
 
 "use client";

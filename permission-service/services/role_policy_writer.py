@@ -1,24 +1,17 @@
-"""自定义角色的 Cerbos 策略生成 — 命名空间归属 + 可回滚写入。
+"""自定义角色的 Cerbos 策略生成。
 
-设计依据：docs/permission_model_v2.md §1 目录布局 + §7 明令禁止。
+Cerbos 的模块 ID 是全局的（资源策略按 (resource, version)，派生角色集合按 name），
+目录层级不构成命名空间，因此生成策略时须自行保证不撞车：
 
-Cerbos 的模块 ID 是全局的：资源策略按 (resource, version) 唯一，派生角色集合按
-name 唯一，**目录层级不构成命名空间**。因此生成策略时必须自己保证不撞车：
+1. 派生角色集合名带项目前缀 custom_roles_{project}，否则多个项目的自定义角色
+   会产生同名集合，importDerivedRoles 解析到哪一份不确定。
+2. 只对归属本项目的资源类型生成规则。平台层资源对每个项目都可见，但对它们生成
+   规则会与 platform/ 下的策略撞模块 ID，且生成的派生角色条件恒为真、
+   父角色为 user，等同于把平台权限发给所有登录用户。
+3. 角色必须归属某个项目。平台层不随项目增减，无项目归属的角色写到策略根目录
+   同样会撞项目的模块 ID。
 
-1. 派生角色集合名按项目取（custom_roles_{project}）。
-   此前全项目共用 "custom_roles" 这一个名字，两个项目各有一个自定义角色就产生
-   两个同名集合，而各自生成的资源策略都写 importDerivedRoles: [custom_roles]，
-   解析到哪一份不确定。
-2. 只允许生成**归属于本项目**的资源类型的策略。
-   platform / project_permission 对每个项目都可见，但它们是平台层资源；
-   若允许项目级角色对它们生成规则，会与 platform/ 下的策略构成同一个模块 ID，
-   且生成的派生角色条件恒为真、父角色为 user —— 等于把平台权限发给所有登录用户。
-3. 自定义角色必须归属某个项目。
-   平台层按设计只有两个文件、不随项目增减（§1），没有"平台级自定义派生角色"
-   这一形态；无项目归属的角色也无处可写（写到策略根目录同样会撞项目的模块 ID）。
-
-写入与数据库提交可互相回滚：本模块保留被改写文件的原始内容，
-调用方在数据库操作失败时调用 restore() 还原文件系统。
+写入可回滚：保留被改写文件的原始内容，调用方在数据库操作失败时调用 restore()。
 """
 
 from __future__ import annotations
@@ -38,15 +31,12 @@ _LEGACY_DERIVED_SET = "custom_roles"
 
 class PolicyWriteError(Exception):
     """策略生成失败，调用方应拒绝该请求。"""
-
-
 @dataclass
 class PolicyTransaction:
     """记录本次写入触及的文件及其原始内容，用于失败回滚。
 
     original 中值为 None 表示该文件在写入前不存在，回滚时应删除。
     """
-
     original: dict[Path, str | None] = field(default_factory=dict)
 
     def capture(self, path: Path) -> None:

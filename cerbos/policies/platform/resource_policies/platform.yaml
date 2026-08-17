@@ -1,32 +1,24 @@
-# ══════════════════════════════════════════════════════════════
 # Layer 1 · 平台层 — 功能模块入口控制
-# ══════════════════════════════════════════════════════════════
 #
-# 回答的问题：你有没有资格进入这个管理功能模块？
+# 位于 cerbos/policies/platform/ 全局唯一命名空间，不随项目增减。
 #
-# 归属：cerbos/policies/platform/ 全局唯一命名空间，不随项目增减。
-#       此前该文件位于策略根目录（更早版本位于 rag-v14/ 项目目录内），
-#       平台层与项目层混在一起，导致无策略项目也能看到 RAG 的角色与动作。
+# 约定：
+#   - 只认 Keycloak 角色（roles 字段）与平台功能授权记录
+#   - 不 importDerivedRoles，不引用任何项目 ID、KB ID、文档属性
+#   - 不写显式 DENY 规则，未命中即隐式拒绝
 #
-# 约定（见 docs/permission_model_v2.md §2）：
-#   ✓ 只认 Keycloak 原始角色（roles 字段）与「平台功能授权记录」；
-#   ✓ 不 importDerivedRoles —— 平台层不依赖任何项目的派生角色；
-#   ✓ 不引用任何项目 ID、KB ID、文档属性；
-#   ✗ 不写显式 DENY 规则，未命中即 Cerbos 隐式拒绝。
+# resource.id = 平台功能 ID，目录见 app/platform_features.py PLATFORM_FEATURES。
+# Actions: platform:read / platform:write，write 不隐含 read。
 #
-# resource.id = 平台功能 ID，权威目录见 app/platform_features.py PLATFORM_FEATURES。
-# Actions: platform:read / platform:write（write 不隐含 read，两者分别授予）。
-#
-# 运行时唯一判定路径：services/platform_authorizer.py 把本策略的判定结果
-# 组装成 {feature_id: [actions]}，管理台侧边栏与 require_platform_permission
-# 都只消费该结果，后端不再自行推导角色→功能映射。
+# 判定结果由 services/platform_authorizer.py 组装成 {feature_id: [actions]}，
+# 供管理台侧边栏与 require_platform_permission 消费。
 apiVersion: api.cerbos.dev/v1
 resourcePolicy:
   version: "default"
   resource: "platform"
 
   rules:
-    # ── 平台超级管理员：全部功能读写 ──
+    # 平台超级管理员：全部功能读写
     # system_admin 为 Keycloak realm 角色；platform_admin 为平台角色绑定
     # （role_bindings 中 project_id IS NULL 的绑定，由后端并入 principal.roles）。
     - name: "platform_admin_full"
@@ -34,13 +26,13 @@ resourcePolicy:
       effect: EFFECT_ALLOW
       roles: ["system_admin", "platform_admin"]
 
-    # ── 平台查看者：全部功能只读 ──
+    # 平台查看者：全部功能只读
     - name: "platform_viewer_read"
       actions: ["platform:read"]
       effect: EFFECT_ALLOW
       roles: ["platform_viewer"]
 
-    # ── 平台审计员：仅审计、策略模拟、概览三个模块只读 ──
+    # 平台审计员：仅审计、策略模拟、概览三个模块只读
     - name: "platform_auditor_read"
       actions: ["platform:read"]
       effect: EFFECT_ALLOW
@@ -50,9 +42,9 @@ resourcePolicy:
           expr: >
             request.resource.id in ["audit_mgmt", "playground", "dashboard"]
 
-    # ── 项目成员基线：无平台角色的项目成员可只读几个基础模块 ──
-    # project_member 是后端注入的合成角色（"该用户在 project_members 表中"这一
-    # 事实），规则本身写在策略里 —— 要调整成员能看到哪些模块只改这一处。
+    # 项目成员基线：无平台角色的项目成员可只读几个基础模块
+    # project_member 是后端注入的合成角色，对应 project_members 表中的成员资格；
+    # 成员可见哪些模块由本规则决定。
     - name: "project_member_baseline"
       actions: ["platform:read"]
       effect: EFFECT_ALLOW

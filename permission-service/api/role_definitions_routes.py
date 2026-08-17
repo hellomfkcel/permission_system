@@ -1,7 +1,5 @@
 """角色管理 API — 角色定义 CRUD + 权限矩阵。
 
-设计依据：docs/permission_model_v2.md §3 数据来源边界。
-
 一致性约定：
 - 权限的唯一权威源是 Cerbos 策略文件。role_definitions 表只保存档案信息
   （描述、激活角色、项目归属、是否内置），表里已无 permissions 列
@@ -9,11 +7,9 @@
 - 写路径先写策略文件，再提交数据库；数据库失败时回滚文件。
 - 读路径统一走 _role_view()，管理台展示与判定链路取值同源。
 
-作用域约定（修复"无策略项目显示其他项目权限"）：
-角色的权限按**查询所处的项目**解析，而不是按角色自身的 project_id。
-平台级角色（project_id IS NULL）在 demo-project 下只应显示 demo-project 与
-平台层策略授予它的动作；此前一律按全局并集计算，rag-v14 的 kb:read / doc:*
-会出现在一个连策略目录都没有的项目里。
+作用域约定：角色的权限按查询所处的项目解析，而不是按角色自身的 project_id。
+平台级角色（project_id IS NULL）在某项目下只显示该项目与平台层策略授予它的动作，
+不做跨项目并集。
 """
 
 import structlog
@@ -109,8 +105,7 @@ def _role_permissions(name: str, project_id: str | None) -> list[str]:
     """返回角色在指定作用域内被策略直接授予的动作。
 
     取值只来自 Cerbos 策略文件（唯一权威源），且不做 parentRoles 并集 ——
-    parentRoles 是激活条件，把子角色权限并给父角色会让 user 显示成全权角色，
-    反过来又让"继承了 user 的" kb_reader 看起来权限反而更少。
+    parentRoles 是激活条件而非权限继承，不做并集。
     """
     return get_role_effective_permissions(name, project_id)
 
@@ -269,8 +264,8 @@ async def create_role_definition(
     避免出现表中有角色而策略中没有的分叉状态。
 
     角色写入该项目的策略目录，派生角色集合名带项目前缀，动作取值只能是该项目
-    自有资源策略中已声明的动作 —— 平台层资源（platform / project_permission）
-    不可作为目标，见 services/role_policy_writer 的说明。
+    自有资源策略中已声明的动作；平台层资源不可作为目标，
+    见 services/role_policy_writer。
     """
     if not scope.can_access(body.project_id):
         raise HTTPException(
@@ -340,9 +335,6 @@ async def update_role_definition(
     _perm: None = Depends(require_platform_permission("role_mgmt", "platform:write")),
 ) -> RoleDefOut:
     """更新自定义角色的描述、父角色与权限。
-
-    补齐原先缺失的更新入口：此前修改权限只能删除重建，而有活跃绑定的角色
-    不允许删除，导致这类角色的权限无法调整。
 
     内置角色（is_system=true）不可更新：其策略条件由手工维护，
     生成器无法复现（例如 rag_roles 中读 granted_actions 的表达式）。

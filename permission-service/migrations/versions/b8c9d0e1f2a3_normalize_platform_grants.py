@@ -4,7 +4,6 @@ Revision ID: b8c9d0e1f2a3
 Revises: a7b8c9d0e1f2
 Create Date: 2026-08-17
 
-设计依据：docs/permission_model_v2.md §1 三层授权模型。
 
 platform 是平台层资源，它的授权记录不属于任何项目（project_id IS NULL）。
 迁移 c3d4e5f6a7b8 归一过一次，但此后管理台在授予平台功能权限时仍会带上当前项目

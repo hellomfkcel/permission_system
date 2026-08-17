@@ -1,7 +1,4 @@
-"""决策面 API — /v1/check + /v1/check/batch + /v1/filter。
-
-设计依据：docs/外部系统设计.md §2.4.1 决策面 API + 实施方案步骤 3.3/3.4。
-"""
+"""决策面 API — /v1/check + /v1/check/batch + /v1/filter。"""
 
 import uuid
 
@@ -204,7 +201,6 @@ async def check_batch(
 ) -> CheckBatchResponse:
     """批量权限判定 — 单次往返，逐资源独立决策。
 
-    设计依据：J-14 联合契约测试 — 批量端点对 interactive-backend 开放。
     单批 ≤200 条，逐资源独立决策。
     整批传输失败/超时 → 整批判否（fail-closed）。
 
@@ -242,8 +238,6 @@ async def check_batch(
         )
 
     # 3. 聚合全批的 granted_actions（键为 kb_id / project_id，与单条 check 同源）
-    # 此前这里以 resource_id 为键，document 资源的授权因此落在 doc_id 上，
-    # 而策略按 kb_id 查找 —— 批量端点与单条端点判定结果不一致。
     all_granted: dict[str, list[str]] = {}
     for item in body.items:
         item_granted = await resolve_granted_actions(
@@ -366,8 +360,7 @@ async def filter_items(
 
     # 1.5 型二封禁检查 — 对每条 item 检查是否有资源限制
     # 被型二封禁的项直接加入 denied，不发送到 Cerbos 判定
-    # 设计依据：§2.3.1 restrictions 表 + J-4 联合契约测试发现
-    project_id = _project_of(request)
+        project_id = _project_of(request)
     pre_denied_ids: set[str] = set()
     for item in body.items:
         restricted_principals = await check_resource_restriction(
@@ -380,9 +373,8 @@ async def filter_items(
             pre_denied_ids.add(item.resource_id)
 
     # 2. ABAC 路：按 KB / 项目作用域聚合 granted_actions
-    # 此前这里把单篇文档的 doc:retrieve / doc:view 映射成该 KB 的 "read"，
-    # 一条文档级授权会放大成整个 KB 的检索可见性。现在文档级直授只走 ACL 路
-    # （resource.attr.acl，见 _build_resource），两路互不放大。
+    # 文档级直授只走 ACL 路（resource.attr.acl，见 _build_resource），
+    # 不折进 granted_actions，避免单篇文档的授权放大成整个 KB 的检索可见性。
     cerbos_resources: list[dict] = []
     granted_actions: dict[str, list[str]] = {}
 

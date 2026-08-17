@@ -1,9 +1,8 @@
 """项目管理 API — 项目/客户端/API Key/受众 CRUD。
 
-Phase 1: 将硬编码注册表迁移为 DB 驱动的项目管理。
+将硬编码注册表迁移为 DB 驱动的项目管理。
 所有端点需要 system_admin 认证。
 
-设计依据：独立权限平台升级方案 Phase 1。
 """
 
 import hashlib
@@ -162,7 +161,7 @@ async def create_project(
     p = Project(id=body.id, name=body.name, description=body.description)
     db.add(p)
 
-    # ★ 自动将创建者添加为 project_admin
+    # 自动将创建者添加为 project_admin
     from models.project import ProjectMember
     db.add(ProjectMember(
         project_id=body.id,

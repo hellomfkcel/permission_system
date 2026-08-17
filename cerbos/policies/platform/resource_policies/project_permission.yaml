@@ -1,19 +1,14 @@
-# ══════════════════════════════════════════════════════════════
 # Layer 2 · 项目权限数据层 — 项目内权限数据的操作控制
-# ══════════════════════════════════════════════════════════════
 #
-# 回答的问题：进门之后，你能操作这个项目的哪类权限数据？
-#
-# 归属：cerbos/policies/platform/ 全局唯一，所有项目共用一份。
-#       新增项目不需要新增此文件 —— 项目边界由 resource.attr.project_id 表达，
-#       不由文件名或角色名表达。
+# 位置：cerbos/policies/platform/ 全局唯一，所有项目共用一份。
+#       新增项目无需新增此文件：项目边界由 resource.attr.project_id 表达，
+#       而非文件名或角色名。
 #
 # 约定：
-#   ✓ granted_actions 的键统一为 project_id（不是 resource.id）；
-#     原设计里 read/write 委托规则以 resource.id（member_list 等）为键，
-#     与项目级授权记录的粒度不对称，无法用一条授权覆盖整个项目的权限数据。
-#   ✓ 不 importDerivedRoles，不引用任何项目专属角色名；
-#   ✗ 不写显式 DENY 规则。
+#   - granted_actions 的键统一为 project_id，而非 resource.id：以 resource.id
+#     为键时粒度与项目级授权记录不对称，无法用一条授权覆盖整个项目的权限数据
+#   - 不 importDerivedRoles，不引用任何项目专属角色名
+#   - 不写显式 DENY 规则
 #
 # resource.id = 权限数据类别：
 #   member_list        项目成员列表
@@ -29,13 +24,13 @@ resourcePolicy:
   resource: "project_permission"
 
   rules:
-    # ── 平台超管兜底：任何项目的权限数据均可读写 ──
+    # 平台超管兜底：任何项目的权限数据均可读写
     - name: "platform_admin_override"
       actions: ["permission:read", "permission:write"]
       effect: EFFECT_ALLOW
       roles: ["system_admin", "platform_admin"]
 
-    # ── 项目管理员：granted_actions[project_id] 含 manage ──
+    # 项目管理员：granted_actions[project_id] 含 manage
     - name: "project_manager_full"
       actions: ["permission:read", "permission:write"]
       effect: EFFECT_ALLOW
@@ -53,7 +48,7 @@ resourcePolicy:
                     request.resource.attr.project_id
                   ].exists(x, x == "manage")
 
-    # ── 委托只读：granted_actions[project_id] 含 permission:read ──
+    # 委托只读：granted_actions[project_id] 含 permission:read
     - name: "delegated_read"
       actions: ["permission:read"]
       effect: EFFECT_ALLOW
@@ -71,7 +66,7 @@ resourcePolicy:
                     request.resource.attr.project_id
                   ].exists(x, x == "permission:read" || x == "permission:write")
 
-    # ── 委托读写：granted_actions[project_id] 含 permission:write ──
+    # 委托读写：granted_actions[project_id] 含 permission:write
     - name: "delegated_write"
       actions: ["permission:write"]
       effect: EFFECT_ALLOW

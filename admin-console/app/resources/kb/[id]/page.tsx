@@ -1,7 +1,6 @@
 /** KB 详情路由页面。
  *
  * RAG 系统通过 {ADMIN_CONSOLE_URL}/resources/kb/{kb_id} 跳转到此页面。
- * 设计依据：docs/外部系统设计.md §3.4.3 RAG 系统跳转入口对接。
  */
 
 "use client";

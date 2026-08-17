@@ -1,7 +1,4 @@
-"""角色绑定表。
-
-设计依据：docs/外部系统设计.md §2.3.1 role_bindings 表定义。
-"""
+"""角色绑定表。"""
 
 import uuid
 from datetime import datetime

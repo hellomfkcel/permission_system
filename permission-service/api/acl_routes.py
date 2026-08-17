@@ -1,7 +1,4 @@
-"""管理台 API — ACL 权限授予/回收/查询。
-
-设计依据：docs/外部系统设计.md §2.4.4 管理台专用 API。
-"""
+"""管理台 API — ACL 权限授予/回收/查询。"""
 
 import csv
 import io
@@ -221,7 +218,7 @@ async def grant_acl(
     )
     db.add(entry)
 
-    # ★ Outbox 模式（设计依据 §3.2）：
+    # Outbox 模式：
     # 在同一事务内写 ACL + permission_changes，原子提交
     publisher = get_event_publisher()
     kb_id = body.resource_id if body.resource_type == "kb" else None
@@ -297,7 +294,7 @@ async def revoke_acl(
     entry.revoked = True
     entry.revoked_at = datetime.now(timezone.utc)
 
-    # ★ Outbox 模式：同一事务内写 revoke + permission_changes
+    # Outbox 模式：同一事务内写 revoke + permission_changes
     publisher = get_event_publisher()
     version, change_id = await publisher.write_change_log(
         db,
@@ -413,7 +410,7 @@ async def get_resource_acl_view(
     scope: ProjectScope = Depends(get_project_scope),
     _perm: None = Depends(require_platform_permission("permission_mgmt", "platform:read")),
 ) -> ResourceACLOut:
-    """查看某个资源实例上的 ACL —— 即 Cerbos 判定时看到的 acl / role_acl。
+    """查看某个资源实例上的 ACL，即 Cerbos 判定时看到的 acl / role_acl。
 
     这是 acl_entries 的一个只读投影，不是另一份存储：写入仍走
     POST /api/v1/acl/grant，撤销走 /revoke。同一事实只有一处出处，
@@ -482,10 +479,7 @@ async def get_effective_permissions(
     scope: ProjectScope = Depends(get_project_scope),
     _perm: None = Depends(require_platform_permission("permission_mgmt", "platform:read")),
 ) -> list[EffectivePermission]:
-    """计算某主体对资源的有效权限（合并 ACL + 角色绑定 + 封禁）。需要管理员认证。
-
-    设计依据：docs/外部系统设计.md §2.4.4 ACL 管理 — 有效权限计算。
-    """
+    """计算某主体对资源的有效权限（合并 ACL + 角色绑定 + 封禁）。需要管理员认证。"""
     conditions = [ACLEntry.revoked == False]  # noqa: E712
     if principal:
         conditions.append(ACLEntry.principal == principal)
@@ -524,9 +518,7 @@ async def get_effective_permissions(
 
     output: list[EffectivePermission] = []
     for (p, rt, rid), actions in grouped.items():
-        # 该条目所属项目 —— 角色绑定的展开必须限定在同一项目内。
-        # 此前这里既不按项目过滤绑定，也用全局的角色→动作映射，
-        # 于是别的项目的绑定、别的项目策略里的动作都会混进结果。
+        # 角色绑定的展开限定在该条目所属项目内，避免混入其他项目的绑定与动作
         entry_project = entry_projects.get((p, rt, rid))
 
         role_conditions = [
@@ -649,7 +641,7 @@ async def batch_grant_acl(
             results.append({"principal": grant.principal, "action": grant.action, "status": "failed", "reason": str(e)[:100]})
             failed += 1
 
-    # ★ Outbox 模式：同一事务内写 ACL + permission_changes
+    # Outbox 模式：同一事务内写 ACL + permission_changes
     publisher = get_event_publisher()
     version = 0
     change_id = None
@@ -678,7 +670,7 @@ async def batch_grant_acl(
 
 
 # ══════════════════════════════════════════════════════════════
-# P2-2: CSV 批量导入 ACL
+# CSV 批量导入 ACL
 # ══════════════════════════════════════════════════════════════
 
 
@@ -715,8 +707,6 @@ async def import_acl_csv(
     - 单行失败不影响其余
     - 返回详细错误报告
 
-    设计依据：docs/外部系统设计.md §3.3 /permissions 页面 — 批量操作
-              + docs/权限管理系统架构设计.md §2.1 动词目录。
     """
     # 验证项目访问权限
     if not scope.can_access(project_id):

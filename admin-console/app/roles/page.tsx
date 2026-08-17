@@ -1,13 +1,10 @@
-/** 角色管理 — 三级角色作用域：平台级 | 身份角色 | 项目级。
+/** 角色管理 — 按作用域分组：平台级 | 身份角色 | 项目级。
  *
- * 平台模式：显示全部角色（平台级 + 身份角色 + 各项目派生角色）。
- * 项目模式：显示身份角色 + 该项目派生角色，且**权限按该项目作用域解析**。
+ * 平台模式显示全部角色；项目模式显示身份角色与该项目派生角色，
+ * 权限按该项目作用域解析。
  *
- * 语义（见 docs/permission_model_v2.md）：
- * - 身份角色（user / system_admin）是"入场资格"，在项目层不持有任何权限；
- * - 派生角色才是权限持有者，由 granted_actions 或资源 ACL 激活；
- * - 因此"父角色"一词改称"激活角色" —— 它是激活条件，不是权限继承。
- *   界面上不再出现"子角色继承父角色权限"的暗示。
+ * 身份角色是入场资格，在项目层不持有权限；派生角色才是权限持有者，
+ * 由 granted_actions 或资源 ACL 激活。界面用"激活角色"而非"父角色"。
  */
 
 "use client";
@@ -50,11 +47,7 @@ interface PermMatrix {
   roles: MatrixRole[];
 }
 
-/** 判断角色所属的作用域等级。
- *
- * 身份角色（Keycloak 侧的入场资格）单独成组：它们既不是平台功能角色，
- * 也不属于任何项目，混进"平台级"会让人以为它们持有平台权限。
- */
+/** 判断角色所属的作用域等级。身份角色单独成组，不并入平台级。 */
 function roleScope(r: RoleDef): "platform" | "identity" | "project" {
   if (r.project_id !== null) return "project";
   if (r.kind === "identity") return "identity";
@@ -121,9 +114,7 @@ export default function RolesPage() {
       if (!isPlatformMode) {
         params.project_id = currentProjectId;
       }
-      // 矩阵必须与角色列表用同一个作用域取数：此前矩阵固定拉全局，
-      // 项目模式下角色卡显示的是"全平台并集"的权限数，与项目内实际可用的
-      // 权限对不上（在 demo2 里看 user 显示 14 个权限，实际只有 6 个）。
+      // 矩阵与角色列表必须用同一作用域取数，否则两处权限数对不上
       const [rolesRes, matrixRes] = await Promise.all([
         api.get("/api/v1/roles/definitions", { params }),
         api.get("/api/v1/roles/permissions", { params }),
@@ -187,8 +178,6 @@ export default function RolesPage() {
   }, [roles]);
 
   // ── 权限矩阵 ──
-  // 后端已按角色名去重（同一角色不再拆成 cerbos / keycloak 两个条目），
-  // 这里直接建映射即可，不会出现后写覆盖前写的重复列。
   const allActions = matrix
     ? Array.from(new Set(matrix.roles.flatMap(r => r.permissions))).sort()
     : [];
@@ -259,8 +248,7 @@ export default function RolesPage() {
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {groupRoles.map((r) => {
-                // 权限计数取自 /definitions（与矩阵同一作用域、同一份策略解析），
-                // 不再从全局矩阵取数 —— 那是"卡片显示 14、详情显示 4"的来源。
+                // 计数取自 /definitions，与矩阵同一作用域、同一份策略解析
                 const permCount = r.permissions.length;
                 const scopeBadge = roleScope(r);
                 return (
@@ -374,8 +362,7 @@ export default function RolesPage() {
                       if (!rolePermMap[r.name]?.has(action)) {
                         return <td key={r.name} className="text-center px-3 py-2.5"><span className="text-gray-300">—</span></td>;
                       }
-                      // 区分"策略直授"与"要有授权记录 / ACL 才生效"：
-                      // 一律画 ✅ 会让 user 看起来天生拥有全部权限。
+                      // 区分策略直授与需授权记录 / ACL 才生效
                       const conditional = roleCondMap[r.name]?.has(action);
                       const acl = r.activation === "acl";
                       return (

@@ -1,12 +1,8 @@
-"""ACL 解析器 — 权限 + 角色 + 封禁的统一查询。
+"""ACL 解析器 — 授权记录、角色绑定、封禁的统一查询。
 
-设计依据：docs/外部系统设计.md §2.5.1 权限判定流程 + §2.5.2 可见性投影。
-
-项目隔离（修复判定期不按项目过滤）：
-所有查询接受可选的 project_id。调用方从 request.state.project_id 取值
-（由 X-Api-Key / X-Client-Id 解析得出）。传入时按项目过滤授权数据，
-不再依赖资源类型与资源 ID 在全平台唯一。project_id 为 None 时不过滤，
-供策略模拟等跨项目场景使用。
+所有查询接受可选的 project_id，取自 request.state.project_id（由 X-Api-Key /
+X-Client-Id 解析得出）。传入时按项目过滤授权数据；为 None 时不过滤，供策略模拟
+等跨项目场景使用。资源 ID 只在项目内唯一，因此除跨项目场景外必须传入。
 """
 
 from datetime import datetime, timezone
@@ -92,9 +88,8 @@ async def resolve_bound_roles(
 ) -> set[str]:
     """返回主体通过角色绑定持有、且适用于当前资源的角色名集合。
 
-    调用方把结果并入 Cerbos principal.roles，使匹配 `roles:` 字段的策略
-    （静态角色式项目）也能消费平台侧的角色绑定。此前 principal.roles 只来自
-    JWT，这类项目的角色绑定在判定中完全不生效。
+    调用方把结果并入 Cerbos principal.roles，使匹配 roles 字段的策略
+    （静态角色式项目）也能消费平台侧的角色绑定。
     """
     bindings = await _applicable_bindings(
         db, principals, resource_type, resource_id, channel_kb, project_id,
@@ -171,10 +166,8 @@ async def resolve_granted_actions(
       - KB 级 → acl_entries 中记在该 KB 上的授权 + 适用于该资源的角色绑定；
       - 项目级 → project_members 中的 project_admin 成员资格。
 
-    资源实例级的直授（文档级 ACL）不在这里 —— 它走 resource.attr.acl 的
-    ACL 路（见 get_resource_acl）。此前把文档级 ACL 也折进本函数的结果里，
-    /filter 甚至把单篇文档的 doc:retrieve 映射成整个 KB 的 "read"，
-    一条文档授权会放大成 KB 级可见性。两路分开后不再有这种放大。
+    资源实例级的直授（文档级 ACL）不在此处，走 get_resource_acl 的 ACL 路。
+    两路分开是为了避免文档级授权被放大成 KB 级可见性。
     """
     scope = _scope_key(resource_type, resource_id, channel_kb)
     granted: dict[str, list[str]] = {}
@@ -248,17 +241,16 @@ async def get_resource_acl(
     ACL 是"资源 → 主体"方向的授权，与 granted_actions 的"主体 → 资源"方向
     完全独立，任一命中即放行。
 
-    数据来源是既有的 acl_entries 表 —— 它的 (principal, resource_type,
-    resource_id, action) 已经完整表达了"哪个资源实例允许谁做什么"。
-    不另建 ACL 表：同一事实存在于两处就必然会产生不一致。
+    数据来源是 acl_entries 表，其 (principal, resource_type, resource_id, action)
+    已完整表达资源实例级授权，不另建 ACL 表。
 
     Returns:
         (acl, role_acl)
-        acl      {principal_id: [action, ...]}  当前主体（含其所属组）被直授的动作。
-                 键统一为 Cerbos principal.id，因为策略只能拿到这一个标识；
-                 group: 前缀的授权在此并入当前主体，无需在策略里表达组模型。
-        role_acl {role_name: [action, ...]}     该资源上按角色直授的动作。
-                 键为角色名，Cerbos 侧与 principal.roles 求交集。
+        acl      {principal_id: [action, ...]}  当前主体被直授的动作。键统一为
+                 Cerbos principal.id —— 策略侧只能拿到这一个标识，group: 前缀的
+                 授权在此并入当前主体，无需在策略里表达组模型。
+        role_acl {role_name: [action, ...]}     该资源上按角色直授的动作，
+                 Cerbos 侧与 principal.roles 求交集。
     """
     now = datetime.now(timezone.utc)
 
@@ -477,7 +469,7 @@ async def get_allow_stamps_for_channel(
 ) -> list[str]:
     """查询对 (doc_id, kb_id) 通道有可见性的主体列表。
 
-    三源聚合（设计依据 §14.5.1 + J-6）：
+    三源聚合：
     1. 文档级 ACL：对该文档有 doc:retrieve / doc:view 权限的主体
     2. KB 级 ACL：对该 KB 有 kb:read 或更强权限的主体
     3. 角色绑定：绑定到该 KB 或全租户的主体

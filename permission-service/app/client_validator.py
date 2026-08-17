@@ -1,9 +1,5 @@
 """X-Client-Id 准入矩阵校验中间件。
 
-设计依据：docs/外部系统设计.md §6A.1 五端点使用总表
-          + docs/RAG系统设计v14.md §6A.1 client_id 准入矩阵
-          + docs/权限管理系统架构设计.md §6A.1
-
 每个端点只接受特定的 client_id，防止业务模块伪装身份。
 校验失败 → 403 Forbidden + 安全告警日志。
 """
@@ -17,7 +13,6 @@ import structlog
 from app.config import Settings
 
 # 模块级 Settings 实例（单例模式）。
-# 修复：使用缓存的实例而非每次请求新建，确保 Docker/K8s secret 文件加载的值生效。
 _settings = Settings()
 
 logger = structlog.get_logger(__name__)
@@ -112,7 +107,7 @@ async def validate_api_key(api_key: str) -> str | None:
     cache = await _refresh_api_key_cache()
     return cache.get(key_hash)
 
-# ── Bearer Auth 路径（管理台 API）—— 不强制 X-Client-Id ──
+# Bearer Auth 路径（管理台 API），不强制 X-Client-Id
 # 这些端点通过 get_current_admin 依赖注入验证 Bearer token
 BEARER_AUTH_PATHS = {"/api/v1"}
 
@@ -183,7 +178,6 @@ class ClientIdValidationMiddleware(BaseHTTPMiddleware):
     2. 若配置了 SERVICE_API_KEY，校验 X-Api-Key header（服务间认证）。
     公开端点（/healthz, /readyz, /metrics, /docs）跳过校验。
     """
-
     async def dispatch(self, request: Request, call_next) -> Response:
         path = request.url.path
 
@@ -233,7 +227,7 @@ class ClientIdValidationMiddleware(BaseHTTPMiddleware):
         if error_response is not None:
             return error_response
 
-        # ★ P4 修复：API key 和 client_id 必须属于同一项目
+        # API key 和 client_id 必须属于同一项目
         # 防止跨项目混用：RAG 的 API key + demo 的 client_id 必须被拒绝
         project_id_from_key = getattr(request.state, "project_id", None)
         if project_id_from_key and project_id_from_key != project_id_from_client:

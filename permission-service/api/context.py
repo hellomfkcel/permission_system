@@ -1,7 +1,4 @@
-"""ctx_token 铸造 — POST /v1/context。
-
-设计依据：docs/外部系统设计.md §2.4.1 决策面 API + 实施方案步骤 3.4。
-"""
+"""ctx_token 铸造 — POST /v1/context。"""
 
 import hashlib
 import hmac

@@ -1,7 +1,4 @@
-"""权限服务后端 — FastAPI 入口。
-
-设计依据：docs/外部系统设计.md §2.1 定位 + 实施方案步骤 2.4/11.1/11.2。
-"""
+"""权限服务后端 — FastAPI 入口。"""
 
 import asyncio
 import os as _os
@@ -39,7 +36,6 @@ logger = structlog.get_logger(__name__)
 
 
 # ── Keycloak 定时同步后台任务 ──
-# 设计依据：docs/外部系统设计.md §4.2 权限服务与 Keycloak 的数据同步
 # —— 每 15 分钟定时同步用户/组数据到本地 user_cache 表。
 
 _SYNC_INTERVAL_S = 15 * 60  # 15 分钟
@@ -79,7 +75,7 @@ async def _keycloak_sync_loop(stop_event: asyncio.Event) -> None:
                 updated=updated,
                 deleted=deleted,
             )
-            # P2-3: Emit Keycloak sync metrics
+            # Emit Keycloak sync metrics
             from app.metrics_collector import record_keycloak_sync_success
             record_keycloak_sync_success(
                 created=created, updated=updated, deleted=deleted,
@@ -91,7 +87,7 @@ async def _keycloak_sync_loop(stop_event: asyncio.Event) -> None:
                 iteration=sync_count,
                 error=str(exc)[:200],
             )
-            # P2-3: Emit Keycloak sync failure metric
+            # Emit Keycloak sync failure metric
             from app.metrics_collector import record_keycloak_sync_failed
             record_keycloak_sync_failed()
 
@@ -183,7 +179,7 @@ async def lifespan(application: FastAPI):
     启动时：验证生产安全配置 → 检查数据库连接 → 启动 Keycloak 定时同步。
     关闭时：取消后台任务 → 清理资源。
     """
-    # P1-2: 生产安全启动检查
+    # 生产安全启动检查
     from app.config import validate_production_secrets
     secret_warnings = validate_production_secrets()
     if secret_warnings:
@@ -201,7 +197,7 @@ async def lifespan(application: FastAPI):
     logger.info("permission_service_starting",
                 host=settings.host, port=settings.port)
 
-    # 启动 Keycloak 同步后台任务（设计依据 §4.2）
+    # 启动 Keycloak 同步后台任务
     _stop_event = asyncio.Event()
     _sync_task = asyncio.create_task(_keycloak_sync_loop(_stop_event))
 
@@ -237,7 +233,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ★ OTel FastAPI 自动埋点（必须在 middleware 注册之前调用，
+# OTel FastAPI 自动埋点（必须在 middleware 注册之前调用，
 #   因为 instrumentor 内部调用 add_middleware）
 instrument_fastapi(app)
 
@@ -259,7 +255,7 @@ app.add_middleware(
     max_age=3600,
 )
 
-# X-Client-Id 准入矩阵强制校验（设计依据 §6A.1）
+# X-Client-Id 准入矩阵强制校验
 # 必须在 CORS 之后、路由处理之前执行
 app.add_middleware(ClientIdValidationMiddleware)
 
@@ -274,7 +270,7 @@ async def healthz():
 
 @app.get("/readyz")
 async def readyz():
-    # 权限服务不纳入 /readyz（设计依据：RAG系统设计v14.md §9.4）
+    # 权限服务不纳入 /readyz
     return {"status": "ready"}
 
 
@@ -286,7 +282,6 @@ async def metrics():
     """Prometheus 兼容的指标暴露端点。
 
     提供关键业务指标：端点调用计数、判定结果分布、事件发布计数。
-    设计依据：docs/RAG系统设计v14.md §8.3 Metric 关键指标。
     """
     from sqlalchemy import text
     from app.database import async_session

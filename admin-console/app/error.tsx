@@ -1,6 +1,4 @@
 /** 全局错误边界 — 捕获未预期的渲染异常。
- *
- * 设计依据：docs/frontend-design.md §3.6 降级与错误状态处理。
  */
 
 "use client";

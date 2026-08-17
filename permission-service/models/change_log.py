@@ -1,7 +1,4 @@
-"""变更事件日志表 — 用于对账 + 审计。
-
-设计依据：docs/外部系统设计.md §2.3.1 permission_changes 表定义 + §2.3.2 全局版本号。
-"""
+"""变更事件日志表 — 用于对账 + 审计。"""
 
 import uuid
 from datetime import datetime

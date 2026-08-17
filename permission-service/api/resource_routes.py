@@ -1,7 +1,4 @@
-"""管理台 API — 资源查询、所有权管理与所有权转移。
-
-设计依据：docs/外部系统设计.md §2.4.4 管理台专用 API — 资源管理。
-"""
+"""管理台 API — 资源查询、所有权管理与所有权转移。"""
 
 from datetime import datetime, timezone
 
@@ -109,10 +106,7 @@ async def transfer_ownership(
     admin: Principal = Depends(get_current_admin),
     _perm: None = Depends(require_platform_permission("resource_mgmt", "platform:write")),
 ) -> TransferResult:
-    """转移资源所有权（需要管理员认证）。
-
-    设计依据：docs/外部系统设计.md §2.4.4 资源管理 — 所有权转移。
-    """
+    """转移资源所有权（需要管理员认证）。"""
     stmt = select(ResourceRegistry).where(
         ResourceRegistry.resource_type == body.resource_type,
         ResourceRegistry.resource_id == body.resource_id,
@@ -153,15 +147,13 @@ async def transfer_ownership(
 
 
 # ── 资源所有者查询（管理台 API）──
-# P0-4 修复：从 /v1/resources/{type}/{id}/owners（无 admin auth）
+# 从 /v1/resources/{type}/{id}/owners（无 admin auth）
 # 迁移到 /api/v1/resources/{type}/{id}/owners（需 admin 认证）。
-# 设计依据：docs/外部系统设计.md §2.4.4 管理台专用 API。
 
 
 class ResourceOwnerResponse(BaseModel):
     """资源所有者信息响应。
 
-    设计依据：docs/外部系统设计.md §2.4.4 管理台专用 API
          GET /api/v1/resources/{type}/{id}/owners — 查看资源所有权。
     """
     resource_type: str
@@ -186,9 +178,8 @@ async def get_resource_owners(
     """查询资源所有者信息（管理台 API，需管理员认证）。
 
     管理台用于展示资源的所有权归属。
-    设计依据：docs/外部系统设计.md §2.4.4。
 
-    P0-4 修复：此端点原先仅在 /v1/resources/{type}/{id}/owners（无 admin auth）。
+    此端点原先仅在 /v1/resources/{type}/{id}/owners（无 admin auth）。
     现在同时在 /api/v1/resources/{type}/{id}/owners 提供管理员认证版本。
     """
     stmt = select(ResourceRegistry).where(

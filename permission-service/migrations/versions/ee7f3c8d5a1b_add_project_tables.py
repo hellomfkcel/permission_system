@@ -4,7 +4,7 @@ Revision ID: ee7f3c8d5a1b
 Revises: dddcf4c5164c
 Create Date: 2026-08-07
 
-Phase 1: 新增 projects, project_clients, project_api_keys, project_audiences 四张表。
+新增 projects, project_clients, project_api_keys, project_audiences 四张表。
 替代硬编码的 ALLOWED_CLIENTS, _ALLOWED_AUDIENCES, SERVICE_API_KEY 注册表。
 """
 

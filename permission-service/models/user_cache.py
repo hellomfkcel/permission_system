@@ -1,7 +1,4 @@
-"""Keycloak 用户/组同步缓存模型。
-
-设计依据：docs/外部系统设计.md §4.2 权限服务与 Keycloak 的数据同步。
-"""
+"""Keycloak 用户/组同步缓存模型。"""
 
 import uuid
 from datetime import datetime
@@ -19,7 +16,6 @@ class UserCache(Base):
     权限服务不维护用户数据，只读同步自 Keycloak。
     管理台展示用户列表时从此表读取（避免每次调 Keycloak API）。
     """
-
     __tablename__ = "user_cache"
 
     id: Mapped[uuid.UUID] = mapped_column(

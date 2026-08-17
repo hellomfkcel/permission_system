@@ -1,9 +1,6 @@
 """数据模型层 — 14 张核心表。
 
-设计依据：docs/外部系统设计.md §2.3.1 核心表设计 + §4.2 Keycloak 同步
-         + docs/tenant_design.md §3.1 数据模型
-         + docs/manage_role_design.md §3.1 数据模型。
-Phase 1: 新增 Project/ProjectClient/ProjectApiKey/ProjectAudience 模型。
+新增 Project/ProjectClient/ProjectApiKey/ProjectAudience 模型。
 """
 
 from models.resource import ResourceRegistry

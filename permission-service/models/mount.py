@@ -1,12 +1,8 @@
 """挂载关系表。
 
-设计依据：docs/外部系统设计.md §2.3.1 mount_registry 表定义
-          + docs/permission_model_v2.md §3 数据来源边界（项目隔离）。
-
 项目隔离：resource_registry 的唯一性是 (project_id, resource_type, resource_id)，
-即**不同项目允许使用相同的资源 ID**。挂载关系必须同样按项目隔离，否则一个项目的
-doc_id/kb_id 组合会命中另一个项目的挂载记录 —— link 幂等误判、retire 级联误伤、
-visibility 误判 unmounted 都源于此。
+即不同项目允许使用相同的资源 ID，因此挂载关系也必须按项目隔离 —— 否则一个项目的
+doc_id/kb_id 组合会命中另一个项目的挂载记录。
 """
 
 import uuid

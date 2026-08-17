@@ -3,8 +3,6 @@
  *
  * 登录后调用 GET /api/v1/auth/me/access 获取当前管理员的平台功能权限。
  * 侧边栏使用此 store 决定显示哪些导航项及读写状态。
- *
- * 设计依据：平台级权限管理 Phase 3a。
  */
 
 import { create } from "zustand";

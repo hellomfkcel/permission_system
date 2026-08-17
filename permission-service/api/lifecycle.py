@@ -1,7 +1,4 @@
-"""管理面 API — 生命周期端口 (register/link/unlink/retire) + 资源查询。
-
-设计依据：docs/外部系统设计.md §2.4.3 管理面 API + §2.4.4 管理台专用 API + 实施方案步骤 4.3。
-"""
+"""管理面 API — 生命周期端口 (register/link/unlink/retire) + 资源查询。"""
 
 import re
 import uuid
@@ -21,7 +18,7 @@ from services.event_publisher import get_event_publisher
 
 
 def _caller_project(request: Request, declared: str | None) -> str:
-    """本次调用归属的项目 —— 以凭据为准，请求体只能复述不能改写。
+    """本次调用归属的项目。以凭据为准，请求体只能复述不能改写。
 
     project_id 的事实来源是 X-Api-Key + X-Client-Id（由 ClientIdValidationMiddleware
     校验后注入 request.state）。请求体里的 project_id 是调用方自述，若与凭据不一致
@@ -50,7 +47,7 @@ def _caller_project(request: Request, declared: str | None) -> str:
 router = APIRouter(prefix="/v1/resources", tags=["lifecycle"])
 
 # ── 幂等键格式校验 ──
-# 设计依据 §6A.7：{facade}-{tenant}-{resource_id}[-{kb_id}]-{schema_version}
+# 幂等键格式：{facade}-{tenant}-{resource_id}[-{kb_id}]-{schema_version}
 # 禁止时间戳和随机数（非确定性值），但不禁止作为资源标识符的 UUID。
 # 原因：resource_id 本身可能是 UUID（系统分配的确定性标识），
 #       同一资源始终产生同一 UUID，因此嵌入 key 中仍然是确定性可重算的。
@@ -73,7 +70,6 @@ _IDEMPOTENCY_FORBIDDEN_RE = re.compile(
 
 # 确定性资源标识符（UUID）——校验时间戳前先掩掉，避免全数字 UUID 段
 # （如 a0000000-0000-0000-0000-000000000001 的末段 0000000001）被误判为时间戳。
-# 2026-08-16 联调发现：RAG 删除文档对 seed KB 的 unlink 因该误判返回 422。
 _IDEMPOTENCY_UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
@@ -240,7 +236,7 @@ async def register_resource(
     )
     db.add(resource)
 
-    # ★ Outbox 模式（设计依据 §3.2 + §5.1）：
+    # Outbox 模式：
     # 生命周期操作需要发布 VisibilityChanged 事件，触发 RAG 侧盖戳刷新
     publisher = get_event_publisher()
     version, change_id = await publisher.write_change_log(
@@ -291,8 +287,7 @@ async def link_resource(
     doc_id = body.resource_id
     kb_id = body.kb_id
 
-    # 幂等检查 —— 按项目：不同项目允许使用相同的 doc_id / kb_id，
-    # 不带项目条件会命中别的项目的挂载，本项目的挂载就建不起来。
+    # 按项目做幂等检查：不同项目允许使用相同的 doc_id / kb_id
     stmt = select(MountRegistry).where(
         MountRegistry.project_id == project_id,
         MountRegistry.doc_id == doc_id,
@@ -316,7 +311,7 @@ async def link_resource(
     )
     db.add(mount)
 
-    # ★ Outbox 模式：挂载建立 → 发布 VisibilityChanged
+    # Outbox 模式：挂载建立 → 发布 VisibilityChanged
     publisher = get_event_publisher()
     version, change_id = await publisher.write_change_log(
         db,
@@ -377,7 +372,7 @@ async def unlink_resource(
     mount.unlinked = True
     mount.updated_at = datetime.now(timezone.utc)
 
-    # ★ Outbox 模式：挂载解除 → 发布 VisibilityChanged(unmounted=true)
+    # Outbox 模式：挂载解除 → 发布 VisibilityChanged(unmounted=true)
     publisher = get_event_publisher()
     version, change_id = await publisher.write_change_log(
         db,
@@ -472,8 +467,8 @@ async def retire_resource(
             mount.unlinked = True
             mount.updated_at = datetime.now(timezone.utc)
 
-    # ★ Outbox 模式：资源退役 → 发布 VisibilityChanged
-    # 设计依据 §13.4.3：retire 四合一（回收 ACL + restriction + 解挂 + 置 retired）
+    # Outbox 模式：资源退役 → 发布 VisibilityChanged
+    # retire 四合一：回收 ACL + restriction + 解挂 + 置 retired
     publisher = get_event_publisher()
     version, change_id = await publisher.write_change_log(
         db,
@@ -532,7 +527,6 @@ async def update_resource_attr(
     """更新资源运营属性。
 
     B-DOC 在 MountEnabledChanged 事件处理时调用，同步 is_enabled/allow_download 到权限服务。
-    设计依据：docs/RAG系统设计v14.md §13.4.1 + §14.5.1。
     """
     conditions = [
         ResourceRegistry.resource_type == resource_type,
@@ -597,7 +591,6 @@ async def update_resource_attr(
 class ResourceOwnerResponse(BaseModel):
     """资源所有者信息响应。
 
-    设计依据：docs/外部系统设计.md §2.4.4 管理台专用 API
          GET /api/v1/resources/{type}/{id}/owners — 查看资源所有权。
     """
     resource_type: str
@@ -621,7 +614,6 @@ async def get_resource_owners(
     """查询资源所有者信息。
 
     管理台用于展示资源的所有权归属。
-    设计依据：docs/外部系统设计.md §2.4.4。
     """
     conditions = [
         ResourceRegistry.resource_type == resource_type,
