@@ -8,7 +8,7 @@
 
 设计依据：`docs/外部系统设计.md`、`docs/外部系统实施方案.md`、`docs/权限管理系统架构设计.md`、`docs/tenant_design.md`、`docs/manage_role_design.md`、`docs/cerbos-policy-gray-release.md`。
 
-权限模型以 `docs/permission_model_v2.md` 为准（三层授权 + 单一数据来源），其诊断与整改过程记录在 `docs/rag_permission_service_diagnose_v14.md`。该模型取代了 `docs/manage_role_design.md` 中"角色权限双写"的部分，历史诊断报告 v1–v13 中关于策略目录布局与角色权限来源的描述同样以 v2 为准。
+权限模型以 `docs/permission_model_v2.md` 为准（三层授权 + 单一数据来源），其诊断与整改过程记录在 `docs/rag_permission_service_diagnose_v14.md`，死代码扫描结论记录在 `docs/rag_permission_service_diagnose_v15.md`（诊断完成，删除待执行）。该模型取代了 `docs/manage_role_design.md` 中"角色权限双写"的部分，历史诊断报告 v1–v13 中关于策略目录布局与角色权限来源的描述同样以 v2 为准。
 
 ## 1. 职责边界
 
