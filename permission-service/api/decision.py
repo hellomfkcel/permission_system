@@ -28,7 +28,7 @@ from services.acl_resolver import (
     get_resource_attr,
 )
 from services.cerbos_adapter import get_cerbos
-from app.metrics_collector import record_authz_decision, record_authz_call_failed, record_authz_obligation_unknown
+from app.metrics_collector import record_authz_decision, record_authz_call_failed
 
 router = APIRouter(prefix="/v1", tags=["decision"])
 

@@ -87,26 +87,8 @@ def instrument_fastapi(app):
     FastAPIInstrumentor.instrument_app(app)
 
 
-def start_cerbos_span(action: str, resource_type: str = "", resource_id: str = ""):
-    """为 Cerbos PDP 调用创建子 span。
-
-    返回 span 对象，调用方应在 Cerbos 调用完成后调用 span.end()。
-    使用方式：
-        span = start_cerbos_span("check", "kb", "kb-123")
-        try:
-            result = await cerbos.check(...)
-            span.set_attribute("cerbos.decision", result.get("decision", "unknown"))
-        finally:
-            span.end()
-    """
-    tracer = get_tracer()
-    span = tracer.start_span("cerbos.check" if action == "check" else f"cerbos.{action}")
-    span.set_attribute("cerbos.action", action)
-    if resource_type:
-        span.set_attribute("resource.type", resource_type)
-    if resource_id:
-        span.set_attribute("resource.id", resource_id)
-    return span
+# Cerbos 调用的 span 由 services/cerbos_adapter.py 自行创建
+# （"cerbos.check_resources"），不在此另设包装函数。
 
 
 # ── Langfuse 集成 ───────────────────────────────────────────────

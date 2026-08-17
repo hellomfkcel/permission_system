@@ -31,28 +31,6 @@ const ToastContext = createContext<ToastContextType>({
 
 let toastId = 0;
 
-/** 全局 Toast 引用 —— 供 API 拦截器等非 React 上下文调用。 */
-let _globalShowToast: ((type: ToastType, message: string) => void) | null = null;
-
-/**
- * 全局 Toast 调用入口。
- *
- * 在 React 组件树外的代码（如 axios 拦截器）中调用此函数显示 Toast 提示。
- * ToastProvider 挂载后自动注册。
- *
- * 使用示例:
- *   import { globalToast } from "@/components/shared/Toast";
- *   globalToast("error", "权限不足，请联系管理员");
- */
-export function globalToast(type: ToastType, message: string) {
-  if (_globalShowToast) {
-    _globalShowToast(type, message);
-  } else {
-    // 回退到 console（ToastProvider 尚未挂载）
-    console.warn(`[Toast fallback] ${type}: ${message}`);
-  }
-}
-
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
@@ -69,8 +47,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     [removeToast]
   );
 
-  // 注册全局 Toast 函数：挂载时注册，卸载时清理
-  _globalShowToast = showToast;
+  // 注册全局 Toast —— 供 React 组件树外的代码调用（lib/api.ts 的 axios 拦截器）
   if (typeof window !== "undefined") {
     (
       window as Window & { __globalToast?: typeof showToast }

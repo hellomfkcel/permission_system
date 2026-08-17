@@ -22,29 +22,9 @@ PLATFORM_FEATURES: dict[str, str] = {
     "settings": "系统设置",
 }
 
-# ══════════════════════════════════════════════════════════════
-# 平台角色名常量
-# ══════════════════════════════════════════════════════════════
-PLATFORM_ROLE_NAMES: set[str] = {
-    "platform_admin",
-    "platform_viewer",
-    "platform_auditor",
-}
-
-# ══════════════════════════════════════════════════════════════
-# 平台功能 → 侧边栏路径映射（供前端使用）
-# ══════════════════════════════════════════════════════════════
-PLATFORM_FEATURE_PATHS: dict[str, str] = {
-    "dashboard": "/dashboard",
-    "project_mgmt": "/projects",
-    "tenant_mgmt": "/tenants",
-    "resource_mgmt": "/resources",
-    "user_mgmt": "/users-groups",
-    "role_mgmt": "/roles",
-    "permission_mgmt": "/permissions",
-    "restriction_mgmt": "/restrictions",
-    "policy_mgmt": "/policies",
-    "audit_mgmt": "/audit",
-    "playground": "/playground",
-    "settings": "/settings",
-}
+# 平台角色名（platform_admin / platform_viewer / platform_auditor）不在此维护：
+# 它们的权威定义是 cerbos/policies/platform/resource_policies/platform.yaml 的
+# roles 字段，判定由 services/platform_authorizer.py 交给 Cerbos。
+#
+# 功能 ID → 侧边栏路径的映射同样不在此维护：后端不暴露该映射，
+# 路由路径由管理台自行决定。

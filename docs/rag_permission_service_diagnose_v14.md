@@ -274,7 +274,7 @@ resource_id, action)` 已经完整表达同一件事，再建一张表就是让�
 
 | 事项 | 说明 |
 |---|---|
-| 本轮引入的死代码 | 整改中新增但未接上调用方的两个符号（`check_platform_permission`、`PROJECT_PERMISSION_KINDS`）已在 `docs/rag_permission_service_diagnose_v15.md` A 组记录，待清理 |
+| 本轮引入的死代码 | 整改中新增但未接上调用方的两个符号（`check_platform_permission`、`PROJECT_PERMISSION_KINDS`）已在 `docs/rag_permission_service_diagnose_v15.md` A 组记录并**已清理** |
 | demo2 / demo3 的静态角色式策略 | 这两个演示项目用 `roles:` 字段消费平台侧角色绑定，未按 v2 的派生角色模型改写。功能正常，但与 rag-v14 的写法不统一，后续如要统一需同步调整其角色绑定数据 |
 | `mount_registry_unattributed` | 迁移产生的备查表，确认无用后可手工删除 |
 | 历史诊断文档 | v1–v13 中关于策略目录布局、角色权限来源的描述已被本轮取代，未逐篇回改；以 `docs/permission_model_v2.md` 为准 |

@@ -20,8 +20,6 @@ from services.event_publisher import get_event_publisher
 from api.auth_routes import get_current_admin, get_project_scope, ProjectScope, require_platform_permission
 from schemas.responses import Principal
 from app.role_actions_config import (
-    VALID_ACTIONS,
-    VALID_RESOURCE_TYPES,
     get_valid_actions,
     get_valid_resource_types,
 )
