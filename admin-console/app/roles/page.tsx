@@ -94,7 +94,7 @@ const ACTIVATION_COLORS: Record<string, string> = {
 
 export default function RolesPage() {
   const router = useRouter();
-  const { currentProjectId } = useAuthStore();
+  const { currentProjectId, availableProjects } = useAuthStore();
   const isPlatformMode = !currentProjectId || currentProjectId === "__all__";
 
   const [roles, setRoles] = useState<RoleDef[]>([]);
@@ -107,9 +107,9 @@ export default function RolesPage() {
   const [createName, setCreateName] = useState("");
   const [createDesc, setCreateDesc] = useState("");
   const [createParentRole, setCreateParentRole] = useState("user");
-  const [createScope, setCreateScope] = useState<"platform" | "project">(
-    isPlatformMode ? "platform" : "project"
-  );
+  // 自定义角色必须归属某个项目：平台层按设计只有两个策略文件、不随项目增减，
+  // 没有平台级自定义派生角色这一形态。平台模式下由此下拉框显式选目标项目。
+  const [createProjectId, setCreateProjectId] = useState("");
   const [createError, setCreateError] = useState("");
   const [creating, setCreating] = useState(false);
 
@@ -142,24 +142,21 @@ export default function RolesPage() {
   const handleCreate = async () => {
     setCreateError("");
     if (!createName.trim()) { setCreateError("角色名不能为空"); return; }
+    const targetProject = isPlatformMode ? createProjectId : currentProjectId;
+    if (!targetProject) { setCreateError("请选择角色所属的项目"); return; }
     setCreating(true);
     try {
-      const body: Record<string, unknown> = {
+      await api.post("/api/v1/roles/definitions", {
         name: createName.trim(),
         description: createDesc.trim(),
         parent_keycloak_roles: [createParentRole],
-      };
-      // 平台模式 + 平台级 → 不传 project_id（默认 NULL）
-      // 项目模式 → 始终传当前项目 ID
-      if (!isPlatformMode) {
-        body.project_id = currentProjectId;
-      }
-      await api.post("/api/v1/roles/definitions", body);
+        project_id: targetProject,
+      });
       setCreateOpen(false);
       setCreateName("");
       setCreateDesc("");
       setCreateParentRole("user");
-      setCreateScope("platform");
+      setCreateProjectId("");
       loadData();
     } catch (e: unknown) {
       const err = e as { response?: { data?: { detail?: string } } };
@@ -228,7 +225,7 @@ export default function RolesPage() {
         </div>
         <button
           onClick={() => {
-            setCreateScope(isPlatformMode ? "platform" : "project");
+            setCreateProjectId(isPlatformMode ? "" : (currentProjectId ?? ""));
             setCreateOpen(true);
           }}
           className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700"
@@ -410,24 +407,27 @@ export default function RolesPage() {
             )}
             <div className="space-y-3">
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">作用域</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">所属项目 *</label>
                 {isPlatformMode ? (
                   <select
-                    value={createScope}
-                    onChange={(e) => setCreateScope(e.target.value as "platform" | "project")}
+                    value={createProjectId}
+                    onChange={(e) => setCreateProjectId(e.target.value)}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
                   >
-                    <option value="platform">平台级（所有项目可见）</option>
+                    <option value="">— 请选择项目 —</option>
+                    {availableProjects.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name}（{p.id}）</option>
+                    ))}
                   </select>
                 ) : (
                   <div className="px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-700">
-                    项目级 — 仅在「{currentProjectId}」项目中可见
+                    {currentProjectId}
                   </div>
                 )}
                 <p className="text-xs text-gray-400 mt-1">
-                  {isPlatformMode
-                    ? "平台级角色整个权限平台可见"
-                    : "具体项目中只能创建该项目专属角色"}
+                  自定义角色必须归属一个项目：平台层只有 platform.yaml 与
+                  project_permission.yaml 两个文件、不随项目增减。平台权限请通过
+                  平台角色绑定或按功能的授权记录下发。
                 </p>
               </div>
               <div>

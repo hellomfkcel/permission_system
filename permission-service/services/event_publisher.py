@@ -49,6 +49,7 @@ class EventPublisher:
         tenant_id: str,
         resource_type: str,
         resource_id: str,
+        project_id: str | None,
         event_type: str = "VisibilityChanged",
         kb_id: str | None = None,
         change_detail: dict | None = None,
@@ -56,7 +57,15 @@ class EventPublisher:
         """在同一事务内写入 permission_changes 记录 + 递增版本号。
 
         调用方负责 await db.commit() 提交事务。
-        版本号在同一事务内递增，确保 ACL 变更与事件日志原子提交。
+        版本号在同一事务内递增，确保业务变更与事件日志原子提交。
+
+        project_id 是必填位置参数，由本方法统一写进 change_detail：
+        审计查询按 change_detail->>'project_id' 做项目隔离
+        （permission_changes 表没有独立的项目列），此前由各调用方自行放入，
+        ROLE_BOUND / ROLE_UNBOUND / RESTRICTION_* / OWNERSHIP_TRANSFERRED
+        四类事件漏放，项目级管理员的审计视图里这些记录直接不存在。
+        改成必填参数后，新增事件类型不可能再忘。
+        平台级变更传 None，表示不属于任何项目。
 
         Returns:
             (version, change_entry_id) — 供 publish_to_redis / publish_to_stream 使用。
@@ -69,6 +78,9 @@ class EventPublisher:
         )
         version = result.scalar()
 
+        detail = dict(change_detail or {})
+        detail["project_id"] = project_id
+
         change_id = uuid.uuid4()
         change_entry = PermissionChange(
             id=change_id,
@@ -77,7 +89,7 @@ class EventPublisher:
             resource_id=resource_id if resource_id else None,
             kb_id=kb_id,
             tenant_id=tenant_id,
-            change_detail=change_detail or {},
+            change_detail=detail,
             version=version,
         )
         db.add(change_entry)
@@ -224,6 +236,7 @@ class EventPublisher:
         tenant_id: str,
         resource_type: str,
         resource_id: str,
+        project_id: str | None,
         event_type: str = "VisibilityChanged",
         kb_id: str | None = None,
         change_detail: dict | None = None,
@@ -232,12 +245,14 @@ class EventPublisher:
 
         内部在独立事务中写 change_log 后双通道发布（Pub/Sub + Stream）。
         新代码应使用 write_change_log + publish_event 两步模式。
+
+        project_id 必填，与 write_change_log 同一口径：审计的项目隔离靠它。
         """
         from app.database import async_session
 
         async with async_session() as db:
             version, change_id = await self.write_change_log(
-                db, tenant_id, resource_type, resource_id,
+                db, tenant_id, resource_type, resource_id, project_id,
                 event_type, kb_id, change_detail,
             )
             await db.commit()

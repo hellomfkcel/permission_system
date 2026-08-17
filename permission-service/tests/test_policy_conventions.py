@@ -170,6 +170,42 @@ def test_imported_derived_role_sets_exist(policies):
     assert not missing, f"importDerivedRoles 引用了不存在的派生角色集合：{missing}"
 
 
+def test_no_duplicate_resource_policy_module_ids(policies):
+    """资源策略的模块 ID 是 (resource, version, scope)，**全局**唯一。
+
+    目录层级不是 Cerbos 的命名空间：两个项目各写一份 resource: document 的策略，
+    就是同一个模块的两份定义，加载结果不确定。
+    """
+    seen: dict[tuple[str, str, str], list[str]] = {}
+    for path, _, doc in policies:
+        policy = doc.get("resourcePolicy")
+        if not isinstance(policy, dict):
+            continue
+        key = (
+            policy.get("resource", ""),
+            policy.get("version", "default"),
+            policy.get("scope", ""),
+        )
+        seen.setdefault(key, []).append(str(path))
+    dupes = {k: v for k, v in seen.items() if len(v) > 1}
+    assert not dupes, f"资源策略模块 ID 重复（resource, version, scope）：{dupes}"
+
+
+def test_no_duplicate_derived_role_set_names(policies):
+    """派生角色集合名同样全局唯一。
+
+    自定义角色的集合名由 role_policy_writer.derived_set_name() 按项目生成，
+    手写的集合名也必须各不相同。
+    """
+    seen: dict[str, list[str]] = {}
+    for path, _, doc in policies:
+        derived = doc.get("derivedRoles")
+        if isinstance(derived, dict) and derived.get("name"):
+            seen.setdefault(derived["name"], []).append(str(path))
+    dupes = {k: v for k, v in seen.items() if len(v) > 1}
+    assert not dupes, f"派生角色集合名重复：{dupes}"
+
+
 def test_referenced_derived_roles_are_defined(policies):
     """资源策略 derivedRoles 字段引用的角色都要有定义。"""
     defined_roles = {

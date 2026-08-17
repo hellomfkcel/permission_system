@@ -134,6 +134,7 @@ async def transfer_ownership(
         tenant_id=resource.tenant_id,
         resource_type=body.resource_type,
         resource_id=body.resource_id,
+        project_id=resource.project_id,
         event_type="OWNERSHIP_TRANSFERRED",
         change_detail={
             "previous_owner": previous_owner,

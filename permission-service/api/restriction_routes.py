@@ -105,6 +105,7 @@ async def add_restriction(
         tenant_id=body.tenant_id,
         resource_type=res_type,
         resource_id=res_id,
+        project_id=body.project_id,
         event_type="RESTRICTION_ADDED",
         change_detail={
             "action": "restriction_added",
@@ -176,6 +177,7 @@ async def remove_restriction(
         tenant_id=restriction.tenant_id,
         resource_type=res_type,
         resource_id=res_id,
+        project_id=restriction.project_id,
         event_type="RESTRICTION_REMOVED",
         change_detail={
             "action": "restriction_removed",

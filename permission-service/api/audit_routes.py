@@ -613,52 +613,207 @@ def _validate_policy_path(policy_path: str) -> tuple[bool, str]:
     return True, safe
 
 
-@router.get("/policies", response_model=list[PolicyFileResponse])
-async def list_policy_files(
-    admin: Principal = Depends(get_current_admin),
-    project_id: str | None = Query(None, description="按项目过滤策略（可选，不传=全部项目）"),
-) -> list[PolicyFileResponse]:
-    """列出 Cerbos 活跃策略文件及其 YAML 内容。需要管理员认证。
+# ══════════════════════════════════════════════════════════════
+# 策略文件的命名空间访问控制
+#
+# 策略目录本身就是权限模型的一部分（docs/permission_model_v2.md §1）：
+#   policies/platform/   平台层，全局唯一
+#   policies/{project}/  项目层
+# 因此"能不能改这个文件"必须按命名空间判，而不是只看有没有 policy_mgmt 写权限 ——
+# 否则某个项目的管理员可以改写平台层策略，或改写别的项目的策略。
+# ══════════════════════════════════════════════════════════════
 
-    平台模式（不传 project_id）：列出所有项目的策略文件。
-    项目模式（传 project_id）：仅列出该项目的策略文件。
 
-    从文件系统读取 cerbos/policies/{project_id}/ 目录，
-    排除 .versions/ 目录（版本历史快照，非活跃策略）。
+def _target_namespace(project_id: str | None, safe_path: str) -> str:
+    """推导写入/删除目标所在的命名空间。
+
+    project_id 指定 → 该项目；否则取路径首段（platform/... → "platform"），
+    首段不是目录时视为策略根目录（""）。
     """
     from pathlib import Path
 
-    # 项目模式：只读该项目目录
     if project_id:
-        policy_root = _get_policy_root(project_id)
-        if not policy_root.exists():
-            return []
+        return project_id
+    parts = Path(safe_path).parts
+    return parts[0] if len(parts) >= 3 else ""
 
-        result: list[PolicyFileResponse] = []
-        for yaml_file in policy_root.rglob("*.yaml"):
-            rel_path = yaml_file.relative_to(policy_root)
-            rel_str = str(rel_path)
-            if ".versions" in Path(rel_str).parts:
-                continue
-            try:
-                content = yaml_file.read_text(encoding="utf-8")
-            except Exception:
-                content = f"# Error reading {rel_str}"
-            parent = rel_path.parent.name if str(rel_path.parent) != "." else ""
-            name = f"{parent}/{rel_path.stem}" if parent else rel_path.stem
-            result.append(PolicyFileResponse(
-                path=rel_str, name=name, yaml_content=content,
+
+def _assert_namespace_access(scope: ProjectScope, namespace: str) -> None:
+    """校验管理员是否有权操作该命名空间。
+
+    平台层与策略根目录对所有项目生效，只有平台管理员可写；
+    项目命名空间要求该项目在管理员的项目范围内。
+    """
+    from services.cerbos_policy_parser import PLATFORM_NAMESPACE
+
+    if namespace in ("", PLATFORM_NAMESPACE):
+        if not scope.is_platform_admin:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Only platform administrators may modify platform-layer policies; "
+                    "they apply to every project."
+                ),
+            )
+        return
+    if not scope.can_access(namespace):
+        raise HTTPException(
+            status_code=403, detail=f"No access to project '{namespace}'"
+        )
+
+
+def _assert_policy_layer(yaml_content: str, namespace: str, target: Path) -> None:
+    """校验策略内容与目标命名空间对齐，且不与已有策略撞模块 ID。
+
+    Cerbos 的模块 ID 是全局的：资源策略按 (resource, version, scope)、
+    派生角色集合按 name。目录层级不构成命名空间，所以同名模块写在两个项目目录下
+    就是同一个模块的两份定义，加载结果不确定。
+
+    两条规则：
+      1. 平台层资源（platform / project_permission）只能写在 platform/ 命名空间；
+         项目目录里出现它们，等于用项目级写权限改平台层准入。
+      2. 新写入的模块 ID 不得与**其他文件**已声明的重复。
+    """
+    import yaml as _yaml
+    from services.cerbos_policy_parser import PLATFORM_NAMESPACE, get_resource_layer
+
+    try:
+        documents = [d for d in _yaml.safe_load_all(yaml_content) if isinstance(d, dict)]
+    except Exception:
+        return  # 结构校验由 _validate_policy_yaml 负责
+
+    for doc in documents:
+        policy = doc.get("resourcePolicy") or doc.get("resource_policy")
+        if isinstance(policy, dict):
+            resource = policy.get("resource", "")
+            if (
+                resource
+                and get_resource_layer(resource) == "platform"
+                and namespace != PLATFORM_NAMESPACE
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"'{resource}' is a platform-layer resource and may only be "
+                        f"defined under policies/{PLATFORM_NAMESPACE}/; "
+                        f"writing it into '{namespace or 'the policy root'}' would "
+                        "duplicate the Cerbos module ID."
+                    ),
+                )
+
+    _assert_no_module_id_conflict(documents, target)
+
+
+def _assert_no_module_id_conflict(documents: list[dict], target: Path) -> None:
+    """新内容声明的模块 ID 不得已被其他策略文件占用。"""
+    import yaml as _yaml
+    from pathlib import Path as _Path
+
+    incoming_resources: set[tuple[str, str, str]] = set()
+    incoming_sets: set[str] = set()
+    for doc in documents:
+        policy = doc.get("resourcePolicy") or doc.get("resource_policy")
+        if isinstance(policy, dict) and policy.get("resource"):
+            incoming_resources.add((
+                policy["resource"],
+                policy.get("version", "default"),
+                policy.get("scope", ""),
             ))
-        result.sort(key=lambda p: p.path)
-        return result
+        derived = doc.get("derivedRoles") or doc.get("derived_roles")
+        if isinstance(derived, dict) and derived.get("name"):
+            incoming_sets.add(derived["name"])
 
-    # 平台模式：遍历所有项目目录
+    if not incoming_resources and not incoming_sets:
+        return
+
+    root = _get_policy_root()
+    try:
+        resolved_target = target.resolve()
+    except OSError:
+        resolved_target = target
+
+    for existing in root.rglob("*.y*ml"):
+        if ".versions" in existing.parts:
+            continue
+        if existing.parent.name not in ("derived_roles", "resource_policies"):
+            continue
+        try:
+            if existing.resolve() == resolved_target:
+                continue
+            docs = [
+                d for d in _yaml.safe_load_all(existing.read_text(encoding="utf-8"))
+                if isinstance(d, dict)
+            ]
+        except Exception:
+            continue
+        for doc in docs:
+            policy = doc.get("resourcePolicy") or doc.get("resource_policy")
+            if isinstance(policy, dict) and policy.get("resource"):
+                key = (
+                    policy["resource"],
+                    policy.get("version", "default"),
+                    policy.get("scope", ""),
+                )
+                if key in incoming_resources:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Resource policy {key} is already defined in "
+                            f"{existing.relative_to(root)}. Cerbos module IDs are "
+                            "global; edit that file instead."
+                        ),
+                    )
+            derived = doc.get("derivedRoles") or doc.get("derived_roles")
+            if isinstance(derived, dict) and derived.get("name") in incoming_sets:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Derived role set '{derived['name']}' is already defined in "
+                        f"{existing.relative_to(root)}. Pick a project-scoped name."
+                    ),
+                )
+
+
+@router.get("/policies", response_model=list[PolicyFileResponse])
+async def list_policy_files(
+    admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    project_id: str | None = Query(None, description="按项目过滤策略（可选，不传=全部可见项目）"),
+) -> list[PolicyFileResponse]:
+    """列出 Cerbos 活跃策略文件及其 YAML 内容。需要管理员认证。
+
+    项目模式（传 project_id）：仅列出该项目的策略文件，需在管理员项目范围内。
+    平台模式（不传 project_id）：列出**管理员可见范围内**的策略文件 ——
+    平台管理员看全部；项目级管理员只看自己项目的目录，外加平台层与根目录下的
+    公共策略（它们对所有项目生效，可读不可写）。
+
+    此前不传 project_id 会无差别返回全部项目的策略内容，项目级管理员因此能读到
+    其他项目的完整策略。
+
+    排除 .versions/ 目录（版本历史快照，非活跃策略）。
+    """
+    from pathlib import Path
+    from services.cerbos_policy_parser import PLATFORM_NAMESPACE
+
     policy_root = _get_policy_root()
+
+    if project_id:
+        _assert_namespace_access(scope, project_id)
+        allowed: set[str] | None = {project_id}
+    elif scope.is_platform_admin:
+        allowed = None  # 全部命名空间
+    else:
+        # 自己的项目 + 全局命名空间（平台层 / 根目录），只读
+        allowed = set(scope.project_ids or set()) | {"", PLATFORM_NAMESPACE}
+
     result: list[PolicyFileResponse] = []
     for yaml_file in policy_root.rglob("*.yaml"):
         rel_path = yaml_file.relative_to(policy_root)
         rel_str = str(rel_path)
         if ".versions" in Path(rel_str).parts:
+            continue
+        namespace = _target_namespace(None, rel_str)
+        if allowed is not None and namespace not in allowed:
             continue
         try:
             content = yaml_file.read_text(encoding="utf-8")
@@ -666,8 +821,12 @@ async def list_policy_files(
             content = f"# Error reading {rel_str}"
         parent = rel_path.parent.name if str(rel_path.parent) != "." else ""
         name = f"{parent}/{rel_path.stem}" if parent else rel_path.stem
+        # 项目模式下路径相对该项目目录，保持既有契约
+        display_path = (
+            str(Path(rel_str).relative_to(project_id)) if project_id else rel_str
+        )
         result.append(PolicyFileResponse(
-            path=rel_str, name=name, yaml_content=content,
+            path=display_path, name=name, yaml_content=content,
         ))
     result.sort(key=lambda p: p.path)
     return result
@@ -678,6 +837,7 @@ async def write_policy_file(
     policy_path: str,
     body: PolicyWriteRequest,
     principal: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
     _perm: None = Depends(require_platform_permission("policy_mgmt", "platform:write")),
     project_id: str | None = Query(None, description="目标项目 ID（写入 policies/{project_id}/ 目录）"),
 ) -> PolicyWriteResult:
@@ -706,9 +866,14 @@ async def write_policy_file(
     if not is_valid:
         raise HTTPException(status_code=422, detail=f"Invalid policy YAML: {error_msg}")
 
+    # 命名空间访问控制 + 内容与层级对齐 + 模块 ID 冲突检查
+    namespace = _target_namespace(project_id, safe_path)
+    _assert_namespace_access(scope, namespace)
+
     # 确保目录存在（按项目隔离）
     policy_root = _get_policy_root(project_id)
     target_file = policy_root / safe_path
+    _assert_policy_layer(body.yaml_content, namespace, target_file)
     target_file.parent.mkdir(parents=True, exist_ok=True)
 
     # 检查是新文件还是更新
@@ -765,6 +930,7 @@ async def upload_policy_file(
     policy_subpath: str = Form("", description="可选: 子路径（如 resource_policies/kb.yaml），为空则自动推导"),
     message: str = Form("", description="变更说明"),
     principal: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
     _perm: None = Depends(require_platform_permission("policy_mgmt", "platform:write")),
 ) -> PolicyUploadResult:
     """上传 Cerbos 策略文件到指定项目目录。
@@ -836,9 +1002,14 @@ async def upload_policy_file(
             detail=f"推导的路径无效: {safe_subpath}",
         )
 
+    # 命名空间访问控制 + 内容与层级对齐 + 模块 ID 冲突检查
+    namespace = _target_namespace(project_id, safe_path)
+    _assert_namespace_access(scope, namespace)
+
     # 写入项目目录
     policy_root = _get_policy_root(project_id)
     target_file = policy_root / safe_path
+    _assert_policy_layer(yaml_content, namespace, target_file)
     target_file.parent.mkdir(parents=True, exist_ok=True)
 
     is_new = not target_file.exists()
@@ -879,6 +1050,7 @@ async def upload_policy_file(
 async def delete_policy_file(
     policy_path: str,
     principal: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
     _perm: None = Depends(require_platform_permission("policy_mgmt", "platform:write")),
     project_id: str | None = Query(None, description="目标项目 ID"),
 ) -> PolicyWriteResult:
@@ -892,6 +1064,8 @@ async def delete_policy_file(
             status_code=422,
             detail="Invalid policy path. Must be a relative path ending with .yaml or .yml",
         )
+
+    _assert_namespace_access(scope, _target_namespace(project_id, safe_path))
 
     policy_root = _get_policy_root(project_id)
     target_file = policy_root / safe_path
@@ -1189,15 +1363,19 @@ class PolicyDiffResponse(BaseModel):
 async def list_policy_versions(
     policy_path: str,
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
     _perm: None = Depends(require_platform_permission("policy_mgmt", "platform:read")),
 ) -> list[PolicyVersionEntry]:
     """列出策略文件的所有历史版本。需要管理员认证。
 
     设计依据：docs/外部系统设计.md §3.3 /policies 页面 — 策略版本历史。
+    历史快照与当前策略同属一个命名空间，访问控制口径一致。
     """
     is_safe, safe_path = _validate_policy_path(policy_path)
     if not is_safe:
         raise HTTPException(status_code=422, detail="Invalid policy path")
+
+    _assert_namespace_access(scope, _target_namespace(None, safe_path))
 
     policy_root = _get_policy_root()
     safe_path_obj = Path(safe_path)
@@ -1244,6 +1422,8 @@ async def list_policy_versions(
 async def diff_policy_versions(
     policy_path: str,
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("policy_mgmt", "platform:read")),
     v1: str = Query("current", description="基准版本 ID 或 'current'"),
     v2: str = Query(..., description="对比版本 ID"),
 ) -> PolicyDiffResponse:
@@ -1258,6 +1438,8 @@ async def diff_policy_versions(
     is_safe, safe_path = _validate_policy_path(policy_path)
     if not is_safe:
         raise HTTPException(status_code=422, detail="Invalid policy path")
+
+    _assert_namespace_access(scope, _target_namespace(None, safe_path))
 
     policy_root = _get_policy_root()
     safe_path_obj = Path(safe_path)

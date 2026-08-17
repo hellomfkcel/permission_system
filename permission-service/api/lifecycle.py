@@ -19,6 +19,34 @@ from models.resource import ResourceRegistry
 from models.mount import MountRegistry
 from services.event_publisher import get_event_publisher
 
+
+def _caller_project(request: Request, declared: str | None) -> str:
+    """本次调用归属的项目 —— 以凭据为准，请求体只能复述不能改写。
+
+    project_id 的事实来源是 X-Api-Key + X-Client-Id（由 ClientIdValidationMiddleware
+    校验后注入 request.state）。请求体里的 project_id 是调用方自述，若与凭据不一致
+    则拒绝：否则持有 A 项目凭据的调用方可以直接把资源登记进 B 项目。
+
+    Raises:
+        HTTPException 403: 请求体声明的项目与凭据不符。
+        HTTPException 401: 缺少项目上下文（凭据未通过中间件校验）。
+    """
+    caller = getattr(request.state, "project_id", None)
+    if not caller:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing project context; a valid X-Api-Key is required.",
+        )
+    if declared and declared != caller:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Credential belongs to project '{caller}' but the request body "
+                f"declares '{declared}'."
+            ),
+        )
+    return caller
+
 router = APIRouter(prefix="/v1/resources", tags=["lifecycle"])
 
 # ── 幂等键格式校验 ──
@@ -159,6 +187,7 @@ async def list_resources(
 
 @router.post("/register", response_model=LifecycleResponse)
 async def register_resource(
+    request: Request,
     body: ResourceLifecycleRequest,
     db: AsyncSession = Depends(get_db),
 ) -> LifecycleResponse:
@@ -171,10 +200,12 @@ async def register_resource(
     # 幂等键格式校验
     _validate_idempotency_key(body.idempotency_key, "register")
 
+    project_id = _caller_project(request, body.project_id)
+
     # 检查是否已存在（幂等）。按项目查询：资源唯一性是 (项目, 类型, ID)，
     # 不同项目可以使用同名资源类型与相同资源 ID。
     stmt = select(ResourceRegistry).where(
-        ResourceRegistry.project_id == body.project_id,
+        ResourceRegistry.project_id == project_id,
         ResourceRegistry.resource_type == body.resource_type,
         ResourceRegistry.resource_id == body.resource_id,
     )
@@ -200,7 +231,7 @@ async def register_resource(
     new_id = uuid.uuid4()
     resource = ResourceRegistry(
         id=new_id,
-        project_id=body.project_id,
+        project_id=project_id,
         resource_type=body.resource_type,
         resource_id=body.resource_id,
         name=body.name,  # 资源名称（KB 名称 / 文档文件名）
@@ -217,8 +248,9 @@ async def register_resource(
         tenant_id=body.tenant_id,
         resource_type=body.resource_type,
         resource_id=body.resource_id,
+        project_id=project_id,
         event_type="RESOURCE_REGISTERED",
-        change_detail={"action": "resource_registered", "project_id": body.project_id},
+        change_detail={"action": "resource_registered", "project_id": project_id},
     )
     await db.commit()  # 资源注册 + change_log 原子提交
 
@@ -228,7 +260,7 @@ async def register_resource(
         body.resource_type, body.resource_id,
         event_type="RESOURCE_REGISTERED",
         kb_id=body.kb_id,
-        change_detail={"action": "resource_registered", "project_id": body.project_id},
+        change_detail={"action": "resource_registered", "project_id": project_id},
     )
 
     return LifecycleResponse(
@@ -239,6 +271,7 @@ async def register_resource(
 
 @router.post("/link", response_model=LifecycleResponse)
 async def link_resource(
+    request: Request,
     body: ResourceLifecycleRequest,
     db: AsyncSession = Depends(get_db),
 ) -> LifecycleResponse:
@@ -254,11 +287,14 @@ async def link_resource(
     # 幂等键格式校验
     _validate_idempotency_key(body.idempotency_key, "link")
 
+    project_id = _caller_project(request, body.project_id)
     doc_id = body.resource_id
     kb_id = body.kb_id
 
-    # 幂等检查
+    # 幂等检查 —— 按项目：不同项目允许使用相同的 doc_id / kb_id，
+    # 不带项目条件会命中别的项目的挂载，本项目的挂载就建不起来。
     stmt = select(MountRegistry).where(
+        MountRegistry.project_id == project_id,
         MountRegistry.doc_id == doc_id,
         MountRegistry.kb_id == kb_id,
     )
@@ -274,6 +310,7 @@ async def link_resource(
     new_id = uuid.uuid4()
     mount = MountRegistry(
         id=new_id,
+        project_id=project_id,
         doc_id=doc_id,
         kb_id=kb_id,
     )
@@ -286,6 +323,7 @@ async def link_resource(
         tenant_id=body.tenant_id,
         resource_type="document",
         resource_id=doc_id,
+        project_id=project_id,
         kb_id=kb_id,
         event_type="RESOURCE_LINKED",
         change_detail={"action": "resource_linked", "doc_id": doc_id, "kb_id": kb_id},
@@ -308,6 +346,7 @@ async def link_resource(
 
 @router.post("/unlink", response_model=LifecycleResponse)
 async def unlink_resource(
+    request: Request,
     body: ResourceLifecycleRequest,
     db: AsyncSession = Depends(get_db),
 ) -> LifecycleResponse:
@@ -323,7 +362,9 @@ async def unlink_resource(
     # 幂等键格式校验
     _validate_idempotency_key(body.idempotency_key, "unlink")
 
+    project_id = _caller_project(request, body.project_id)
     stmt = select(MountRegistry).where(
+        MountRegistry.project_id == project_id,
         MountRegistry.doc_id == body.resource_id,
         MountRegistry.kb_id == body.kb_id,
     )
@@ -343,6 +384,7 @@ async def unlink_resource(
         tenant_id=body.tenant_id,
         resource_type="document",
         resource_id=body.resource_id,
+        project_id=project_id,
         kb_id=body.kb_id,
         event_type="RESOURCE_UNLINKED",
         change_detail={
@@ -375,6 +417,7 @@ async def unlink_resource(
 
 @router.post("/retire", response_model=LifecycleResponse)
 async def retire_resource(
+    request: Request,
     body: ResourceLifecycleRequest,
     db: AsyncSession = Depends(get_db),
 ) -> LifecycleResponse:
@@ -387,8 +430,9 @@ async def retire_resource(
     # 幂等键格式校验
     _validate_idempotency_key(body.idempotency_key, "retire")
 
+    project_id = _caller_project(request, body.project_id)
     stmt = select(ResourceRegistry).where(
-        ResourceRegistry.project_id == body.project_id,
+        ResourceRegistry.project_id == project_id,
         ResourceRegistry.resource_type == body.resource_type,
         ResourceRegistry.resource_id == body.resource_id,
     )
@@ -404,7 +448,9 @@ async def retire_resource(
     # 级联清理：如果是 document，解除其所有挂载
     unmounted_kb_ids: list[str] = []
     if body.resource_type == "document":
+        # 级联只在本项目内进行：按裸 doc_id 匹配会解掉别的项目的挂载
         stmt_mounts = select(MountRegistry).where(
+            MountRegistry.project_id == project_id,
             MountRegistry.doc_id == body.resource_id,
             MountRegistry.unlinked == False,  # noqa: E712
         )
@@ -417,6 +463,7 @@ async def retire_resource(
     # 如果是 kb，解除所有文档的挂载
     if body.resource_type == "kb":
         stmt_mounts = select(MountRegistry).where(
+            MountRegistry.project_id == project_id,
             MountRegistry.kb_id == body.resource_id,
             MountRegistry.unlinked == False,  # noqa: E712
         )
@@ -433,6 +480,7 @@ async def retire_resource(
         tenant_id=resource.tenant_id,
         resource_type=body.resource_type,
         resource_id=body.resource_id,
+        project_id=project_id,
         event_type="RESOURCE_RETIRED",
         change_detail={
             "action": "resource_retired",
@@ -519,6 +567,7 @@ async def update_resource_attr(
         tenant_id=body.tenant_id,
         resource_type=resource_type,
         resource_id=resource_id,
+        project_id=project_id,
         event_type="RESOURCE_ATTR_UPDATED",
         change_detail={
             "action": "resource_attr_updated",

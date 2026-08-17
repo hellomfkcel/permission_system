@@ -223,6 +223,66 @@ Cerbos 不可达时 **fail-closed**（503），不回退到本地推断。
 
 ---
 
+## 5A. 项目隔离
+
+项目隔离有三条独立的战线，缺一条都不成立。
+
+### 5A.1 Cerbos 模块 ID 是全局的，目录不是命名空间
+
+资源策略按 `(resource, version, scope)` 唯一，派生角色集合按 `name` 唯一 ——
+**跨整个策略根目录**。`policies/{project}/` 只是文件组织方式，两个项目各写一份
+`resource: document` 的策略就是同一个模块的两份定义。
+
+因此凡是生成或写入策略的路径都必须自己保证不撞车：
+
+| 入口 | 约束 |
+|---|---|
+| 自定义角色生成器 | 派生角色集合名为 `custom_roles_{project}`；只能对**本项目自有**的资源类型生成规则；角色必须归属某个项目 |
+| 策略编辑器 / 上传 | 目标命名空间要在管理员范围内；平台层资源只能写在 `platform/`；模块 ID 与其他文件重复直接 409 |
+| CI | `test_policy_conventions.py` 对仓库里的文件做同样的检查 |
+
+平台层资源（`platform` / `project_permission`）不能作为项目自定义角色的目标：
+生成的派生角色条件恒为真、父角色是 `user`，那等于把平台权限发给所有登录用户。
+
+### 5A.2 授权记录的项目归属
+
+| 表 | 隔离方式 |
+|---|---|
+| `acl_entries` | `project_id`；平台层资源的授权必须是平台级（`NULL`） |
+| `role_bindings` | `project_id`；`NULL` 表示平台级绑定 |
+| `resource_registry` | `(project_id, resource_type, resource_id)` 唯一 |
+| `mount_registry` | `(project_id, doc_id, kb_id)` 唯一 |
+| `role_definitions` | 项目内唯一 + 平台级唯一两个部分索引 |
+| `permission_changes` | `change_detail.project_id`，由 `write_change_log(project_id=...)` 统一写入 |
+
+关键前提：**不同项目允许使用相同的资源 ID**（`resource_registry` 的唯一约束就是
+这么定的）。所以任何按裸 `resource_id` / `doc_id` / `kb_id` 匹配的查询都必须
+带上项目条件，否则会命中别的项目的数据。
+
+授权层级由资源所在的策略命名空间决定，写入时由
+`acl_routes._validate_grant_scope` 校验，运行时读取端再过滤一次：
+
+```
+platform / project_permission  → 平台层 → project_id 必须为空
+kb / document / 项目自定义类型  → 项目层 → project_id 必填，且动作要在该项目策略中声明过
+```
+
+### 5A.3 项目上下文的事实来源
+
+| 调用面 | 项目从哪来 |
+|---|---|
+| `/v1/*`（决策 / 投影 / 生命周期） | `X-Api-Key` + `X-Client-Id`，由中间件校验后注入 `request.state.project_id` |
+| `/api/v1/*`（管理台） | 管理员的 `ProjectScope`（`project_members` + 平台角色） |
+
+请求体里的 `project_id` 只能**复述**凭据里的项目，不一致直接 403
+（`lifecycle._caller_project`）。否则持 A 项目凭据的调用方可以把资源登记进 B 项目。
+
+管理台侧，凡是接受 `project_id` 参数的端点都必须过 `scope.can_access()`；
+策略文件另有命名空间维度的判断（`_assert_namespace_access`）：平台层与策略根目录
+对所有项目生效，只有平台管理员可写。
+
+---
+
 ## 6. 行为变更（升级须知）
 
 | 变更 | 影响 |
@@ -232,8 +292,16 @@ Cerbos 不可达时 **fail-closed**（503），不回退到本地推断。
 | 平台权限改由 Cerbos 判定 | Cerbos 不可达时管理台返回 503，而不是按 JWT 角色放行 |
 | `role_definitions.permissions` 列删除 | 直接读该列的外部查询需改为调用 `/api/v1/roles/permissions` |
 | 派生角色 `admin` → `platform_admin_role` | 存量以 `admin` 名义的角色绑定仍生效（`platform_admin_role` 的 parentRoles 保留了 `admin`） |
+| 自定义角色必须选项目 | `POST /roles/definitions` 的 `project_id` 变为必填；平台模式下管理台改为显式选择目标项目 |
+| 自定义角色不能授平台动作 | 勾选 `platform:*` / `permission:*` 会被 422 拒绝，改用平台角色绑定或按功能的平台授权记录 |
+| 派生角色集合改名 | 项目下的 `custom_roles.yaml` 集合名变为 `custom_roles_{project}`；写入时自动改写同项目内引用旧名的文件 |
+| 平台功能授权改为平台级 | 带 `project_id` 的 `platform` 授权会被 422 拒绝；存量记录由迁移 `b8c9d0e1f2a3` 归一为 `NULL` |
+| 生命周期端点校验项目 | 请求体 `project_id` 与凭据不一致返回 403（此前以请求体为准） |
+| 策略管理端点收紧 | 项目级管理员不能再读写其他项目与平台层的策略；`GET /policies` 不传 `project_id` 时只返回可见范围 |
+| `mount_registry` 加 `project_id` | 无法归属的存量挂载（两端都未注册）移入 `mount_registry_unattributed` 备查后删除 |
 
-升级顺序：先执行 `alembic upgrade head`，再部署服务（代码已不再读 `permissions` 列）。
+升级顺序：先执行 `alembic upgrade head`，再部署服务
+（代码已不再读 `permissions` 列，且依赖 `mount_registry.project_id`）。
 
 ---
 
@@ -246,9 +314,13 @@ Cerbos 不可达时 **fail-closed**（503），不回退到本地推断。
 - 平台层不 import、也不定义派生角色
 - 项目层的授权规则不得直接授给身份角色（`user` / `system_admin` / `admin`）
 - `importDerivedRoles` 与 `derivedRoles` 引用的角色都必须有定义
+- 资源策略模块 ID `(resource, version, scope)` 与派生角色集合名全库不重复
 
 解析语义由 `tests/test_cerbos_policy_parser.py` 守护：项目隔离、平台命名空间
-全局可见、无 parentRoles 并集、矩阵去重。
+全局可见、无 parentRoles 并集、矩阵去重、同名角色跨项目不串味。
+
+策略生成路径由 `tests/test_role_policy_writer.py` 守护：平台层资源不可作为
+项目角色的目标、派生角色集合名按项目隔离、角色必须归属项目、失败不留半成品。
 
 ### 明令禁止
 
