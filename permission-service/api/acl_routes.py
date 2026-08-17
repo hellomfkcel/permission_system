@@ -14,7 +14,7 @@ from app.database import get_db
 from models.acl import ACLEntry
 from models.role_binding import RoleBinding
 from services.event_publisher import get_event_publisher
-from api.auth_routes import get_current_admin, get_project_scope, ProjectScope, require_platform_permission
+from api.auth_routes import assert_project_scope, get_current_admin, get_project_scope, ProjectScope, require_platform_permission
 from schemas.responses import Principal
 from app.role_actions_config import (
     get_valid_actions,
@@ -112,6 +112,18 @@ async def _validate_grant_scope(
         )
 
     if layer == "platform":
+        # 平台层 ACL 是把某个平台功能委托给非管理员，判定路径按 project_id IS NULL
+        # 读它 —— 生效范围是整个平台。只有平台管理员能签发；项目管理员虽然持有
+        # permission_mgmt 的写权限（用于管理自己项目的 ACL），但不得借此把项目级
+        # 权限兑换成平台级权限。
+        if not scope.is_platform_admin:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"'{resource_type}' is a platform-layer resource; only platform "
+                    "administrators may grant platform-scoped permissions."
+                ),
+            )
         if project_id:
             raise HTTPException(
                 status_code=422,
@@ -352,6 +364,7 @@ async def list_acl(
     # 平台级条目（project_id=NULL）始终对所有管理员可见
     from sqlalchemy import or_
     if project_id:
+        assert_project_scope(scope, project_id)
         conditions.append(
             or_(ACLEntry.project_id == project_id, ACLEntry.project_id.is_(None))
         )

@@ -282,6 +282,20 @@ async def get_project_scope(
     )
 
 
+def assert_project_scope(scope: ProjectScope, project_id: str | None) -> None:
+    """读端点显式指定 project_id 时的范围校验。
+
+    模块级 require_platform_permission 只回答"能不能进这个模块"，回答不了
+    "能不能看这个项目"。列表/详情端点若允许 project_id 直接落进过滤条件而不校验
+    范围，项目管理员就能对别的项目取数——写端点已用 scope.can_access 挡住，这里
+    对读端点补齐同一道校验。project_id 为空表示按管理员自身范围过滤，无需校验。
+    """
+    if project_id and not scope.can_access(project_id):
+        raise HTTPException(
+            status_code=403, detail=f"No access to project '{project_id}'"
+        )
+
+
 # ══════════════════════════════════════════════════════════════
 # 平台功能权限依赖（Phase 2a：平台级权限管理）
 # ══════════════════════════════════════════════════════════════

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from models.restriction import Restriction
 from services.event_publisher import get_event_publisher
-from api.auth_routes import get_current_admin, get_project_scope, ProjectScope, require_platform_permission
+from api.auth_routes import assert_project_scope, get_current_admin, get_project_scope, ProjectScope, require_platform_permission
 from schemas.responses import Principal
 
 router = APIRouter(prefix="/api/v1/restrictions", tags=["admin-restrictions"])
@@ -223,6 +223,7 @@ async def list_restrictions(
 
     # 项目范围过滤
     if project_id:
+        assert_project_scope(scope, project_id)
         conditions.append(Restriction.project_id == project_id)
     elif not scope.is_platform_admin:
         scope_filter = scope.filter_condition(Restriction)

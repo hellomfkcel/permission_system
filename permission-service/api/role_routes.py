@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from models.role_binding import RoleBinding
 from services.event_publisher import get_event_publisher
-from api.auth_routes import get_current_admin, get_project_scope, ProjectScope, require_platform_permission
+from api.auth_routes import assert_project_scope, get_current_admin, get_project_scope, ProjectScope, require_platform_permission
 from schemas.responses import Principal
 
 router = APIRouter(prefix="/api/v1/roles", tags=["admin-roles"])
@@ -231,6 +231,7 @@ async def list_bindings(
     # 项目范围过滤 — 平台级条目（project_id=NULL）始终对所有管理员可见
     from sqlalchemy import or_
     if project_id:
+        assert_project_scope(scope, project_id)
         conditions.append(
             or_(RoleBinding.project_id == project_id, RoleBinding.project_id.is_(None))
         )
