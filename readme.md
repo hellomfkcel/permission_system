@@ -8,9 +8,6 @@
 - 后端：**FastAPI**（Python 3.11）+ PostgreSQL + Redis
 - 管理台：**Next.js**（admin-console）
 
-> 深入设计与实施经验见 [`docs/权限平台架构设计与实施指南.md`](docs/权限平台架构设计与实施指南.md)；
-> 权限模型规范见 [`docs/permission_model_v2.md`](docs/permission_model_v2.md)。
-
 ---
 
 ## 架构一览
@@ -146,7 +143,7 @@ token，忽略请求体同名字段。
 | `LOG_FORMAT` | 空 | 设 `json` 输出结构化日志（供 Loki）|
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | OTel Collector |
 
-以 `_FILE` 结尾的变量指向 Secret 挂载路径，存在时覆盖同名明文。完整清单见指南文档。
+以 `_FILE` 结尾的变量指向 Secret 挂载路径，存在时覆盖同名明文。完整清单见 `app/config.py:Settings`。
 
 ---
 
@@ -156,8 +153,6 @@ token，忽略请求体同名字段。
 2. 在 `cerbos/policies/{project_id}/` 写策略，定义本项目资源类型与动作（类型名加项目前缀）。
 3. 建角色定义、授 ACL 或绑角色、配封禁；用 `/playground` 走真实链路验证。
 4. 读 `GET /api/v1/projects/{id}/sdk-config` 接入 SDK；资源写路径接生命周期端口。
-
-详细步骤与授权模型选择见 [架构设计与实施指南 §18](docs/权限平台架构设计与实施指南.md)。
 
 ---
 
@@ -181,18 +176,5 @@ permission-service/     后端（api/ app/ services/ models/ schemas/ idp/ migra
 admin-console/          管理台前端（Next.js）
 perm-service-client/    Python SDK
 cerbos/policies/        Cerbos 策略（platform/ + 各项目目录）
-docs/                   设计文档与诊断记录
 docker-compose*.yml     编排
 ```
-
----
-
-## 文档索引
-
-| 文档 | 内容 |
-| --- | --- |
-| `docs/权限平台架构设计与实施指南.md` | 架构、权限设计方法、注意事项、实施踩坑清单（推荐先读）|
-| `docs/permission_model_v2.md` | 三层授权 + 单一数据源模型规范 |
-| `docs/rag_permission_service_diagnose_v14~v20.md` | 诊断与整改记录（缺陷 F/G/D/OBS 的验证过程）|
-| `docs/keycloak-realm-setup.md` | Keycloak realm 配置 |
-| `docs/cerbos-policy-gray-release.md` | 策略灰度发布流程 |
