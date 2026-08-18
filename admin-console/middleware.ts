@@ -3,8 +3,6 @@
  *
  * 检查 session cookie（登录时设置），未认证用户重定向到 /login。
  * 客户端 AuthGuard 提供双层保护。
- *
- * 设计依据：frontend-design.md §0 认证与租户。
  */
 
 import { NextResponse } from "next/server";

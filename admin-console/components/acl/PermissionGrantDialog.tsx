@@ -1,10 +1,5 @@
 /**
  * PermissionGrantDialog — 权限授予 Dialog 组件。
- *
- * 设计依据：docs/外部系统设计.md §3.4.1 权限授予 Dialog
- *          + docs/权限管理系统架构设计.md §2.1 动词目录（16 个 action）
- *
- * 支持：主体搜索、资源搜索、多 action 勾选、过期时间、批量授予。
  */
 
 "use client";
@@ -36,7 +31,15 @@ const RESOURCE_TYPE_LABELS_FALLBACK: Record<string, string> = {
   kb: "📚 知识库",
   document: "📄 文档",
   platform: "🔧 平台功能",
+  project_permission: "🗂 项目权限数据",
 };
+
+/** 平台层资源类型，其授权是平台级的（不带 project_id）。
+ *
+ * 仅用于决定表单是否要求选择项目；最终校验在后端按策略文件所在的命名空间进行
+ * （acl_routes._validate_grant_scope），此处判断有误会被 422 拒绝。
+ */
+const PLATFORM_LAYER_RESOURCES = new Set(["platform", "project_permission"]);
 
 interface PermissionGrantDialogProps {
   open: boolean;
@@ -261,10 +264,19 @@ export default function PermissionGrantDialog({
     if (!resourceId.trim()) return showToast("error", "请选择资源");
     if (selectedActions.length === 0) return showToast("error", "请至少选择一个权限");
 
+    // 授权记录的项目归属须与资源所在的层对齐：平台层资源不带 project_id，
+    // 项目层资源必须带当前项目
+    const isPlatformLayer = PLATFORM_LAYER_RESOURCES.has(resourceType);
+    const activeProject =
+      currentProjectId && currentProjectId !== "__all__" ? currentProjectId : null;
+    if (!isPlatformLayer && !activeProject) {
+      return showToast("error", "请先在顶部切换到目标项目，再授予项目级权限");
+    }
+    const pid = isPlatformLayer ? null : activeProject;
+
     setSubmitting(true);
     const tenantId = user?.tenant_id || "tenant-dev";
     const grantedBy = principal.startsWith("user:") ? principal : `user:${user?.user_id || "admin"}`;
-    const pid = currentProjectId && currentProjectId !== "__all__" ? currentProjectId : "rag-v14";
 
     try {
       if (selectedActions.length === 1) {

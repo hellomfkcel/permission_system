@@ -1,7 +1,4 @@
-"""租户管理 — 请求 Pydantic 模型。
-
-设计依据：docs/tenant_design.md §3.2.1 租户 CRUD + §3.2.2 成员管理。
-"""
+"""租户管理 — 请求 Pydantic 模型。"""
 
 from pydantic import BaseModel, Field
 
@@ -58,11 +55,3 @@ class AddTenantMemberRequest(BaseModel):
         pattern=r"^(tenant_admin|member)$",
         description="租户内角色: tenant_admin | member",
     )
-
-
-class ListTenantsParams(BaseModel):
-    """租户列表查询参数。"""
-    status: str | None = Field(None, description="筛选状态: active | suspended")
-    search: str | None = Field(None, description="搜索 ID 或名称（模糊匹配）")
-    limit: int = Field(default=50, ge=1, le=200, description="每页条数")
-    offset: int = Field(default=0, ge=0, description="偏移量")

@@ -1,0 +1,107 @@
+# Layer 1 · 平台层 — 功能模块入口控制
+#
+# 位于 cerbos/policies/platform/ 全局唯一命名空间，不随项目增减。
+#
+# 约定：
+#   - 只认 Keycloak 角色（roles 字段）与平台功能授权记录
+#   - 不 importDerivedRoles，不引用任何项目 ID、KB ID、文档属性
+#   - 不写显式 DENY 规则，未命中即隐式拒绝
+#
+# resource.id = 平台功能 ID，目录见 app/platform_features.py PLATFORM_FEATURES。
+# Actions: platform:read / platform:write，write 不隐含 read。
+#
+# 判定结果由 services/platform_authorizer.py 组装成 {feature_id: [actions]}，
+# 供管理台侧边栏与 require_platform_permission 消费。
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: "default"
+  resource: "platform"
+
+  rules:
+    # 平台超级管理员：全部功能读写
+    # system_admin 为 Keycloak realm 角色；platform_admin 为平台角色绑定
+    # （role_bindings 中 project_id IS NULL 的绑定，由后端并入 principal.roles）。
+    - name: "platform_admin_full"
+      actions: ["platform:read", "platform:write"]
+      effect: EFFECT_ALLOW
+      roles: ["system_admin", "platform_admin"]
+
+    # 平台查看者：全部功能只读
+    - name: "platform_viewer_read"
+      actions: ["platform:read"]
+      effect: EFFECT_ALLOW
+      roles: ["platform_viewer"]
+
+    # 平台审计员：仅审计、策略模拟、概览三个模块只读
+    - name: "platform_auditor_read"
+      actions: ["platform:read"]
+      effect: EFFECT_ALLOW
+      roles: ["platform_auditor"]
+      condition:
+        match:
+          expr: >
+            request.resource.id in ["audit_mgmt", "playground", "dashboard"]
+
+    # 项目管理员：项目可见的 7 个业务模块读写。
+    # project_admin 是后端按 project_members.role=project_admin 注入的合成角色；
+    # 准入表达"能进这类模块"，写操作具体落在哪个项目由数据层按 project_id 过滤。
+    - name: "project_admin_manage"
+      actions: ["platform:read", "platform:write"]
+      effect: EFFECT_ALLOW
+      roles: ["project_admin"]
+      condition:
+        match:
+          expr: >
+            request.resource.id in
+              ["resource_mgmt", "role_mgmt", "permission_mgmt",
+               "restriction_mgmt", "policy_mgmt", "audit_mgmt", "playground"]
+
+    # 项目管理员：概览首页只读
+    - name: "project_admin_dashboard"
+      actions: ["platform:read"]
+      effect: EFFECT_ALLOW
+      roles: ["project_admin"]
+      condition:
+        match:
+          expr: request.resource.id == "dashboard"
+
+    # 项目成员（project_viewer）：只读子集 —— 看得到项目的资源与角色，
+    # 但不涉及权限/策略/封禁/审计等管理面。
+    - name: "project_member_readonly"
+      actions: ["platform:read"]
+      effect: EFFECT_ALLOW
+      roles: ["project_member"]
+      condition:
+        match:
+          expr: >
+            request.resource.id in
+              ["dashboard", "resource_mgmt", "role_mgmt"]
+
+    # ── 按功能委托：平台功能授权记录（acl_entries: resource_type='platform'）──
+    # granted_actions 的键为平台功能 ID，值为该功能上被授予的 platform:* 动作。
+    # 这是平台层唯一读取授权记录的地方，用于把单个功能模块委托给非管理员。
+    - name: "delegated_feature_read"
+      actions: ["platform:read"]
+      effect: EFFECT_ALLOW
+      roles: ["user"]
+      condition:
+        match:
+          expr: >
+            has(request.principal.attr.granted_actions) &&
+            request.resource.id in request.principal.attr.granted_actions &&
+            request.principal.attr.granted_actions[request.resource.id]
+              .exists(x, x == "platform:read" || x == "platform:write")
+
+    - name: "delegated_feature_write"
+      actions: ["platform:write"]
+      effect: EFFECT_ALLOW
+      roles: ["user"]
+      condition:
+        match:
+          expr: >
+            has(request.principal.attr.granted_actions) &&
+            request.resource.id in request.principal.attr.granted_actions &&
+            request.principal.attr.granted_actions[request.resource.id]
+              .exists(x, x == "platform:write")
+
+    # 其他角色 / 无授权记录：Cerbos 隐式拒绝，无需显式 DENY 规则。

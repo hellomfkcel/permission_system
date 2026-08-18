@@ -1,7 +1,5 @@
 """权限动词目录 — 单一权威源。
 
-设计依据：docs/权限管理系统架构设计.md §2.1 动词目录。
-
 此文件定义所有有效动作和资源类型，用于：
 - CSV 导入校验（acl_routes.py）
 - 前端资源类型/动作下拉选项
@@ -18,6 +16,15 @@
 PLATFORM_ACTIONS: set[str] = {"platform:read", "platform:write"}
 
 # ══════════════════════════════════════════════════════════════
+# 项目权限数据动作（Layer 2 · project_permission 资源）
+# ══════════════════════════════════════════════════════════════
+
+PROJECT_PERMISSION_ACTIONS: set[str] = {"permission:read", "permission:write"}
+
+# 权限数据类别（member_list / role_assignment / ...）不在此维护：
+# 它们是 project_permission.yaml 中的 resource.id，取值由策略文件决定。
+
+# ══════════════════════════════════════════════════════════════
 # 项目资源动作（kb/document）
 # ══════════════════════════════════════════════════════════════
 
@@ -27,9 +34,13 @@ _KB_DOC_ACTIONS: set[str] = {
     "doc:purge", "doc:share",
 }
 
-VALID_ACTIONS: set[str] = _KB_DOC_ACTIONS | PLATFORM_ACTIONS
+VALID_ACTIONS: set[str] = (
+    _KB_DOC_ACTIONS | PLATFORM_ACTIONS | PROJECT_PERMISSION_ACTIONS
+)
 
-VALID_RESOURCE_TYPES: set[str] = {"kb", "document", "platform"}
+VALID_RESOURCE_TYPES: set[str] = {
+    "kb", "document", "platform", "project_permission",
+}
 
 # ══════════════════════════════════════════════════════════════
 # 资源类型 → 人类可读标签
@@ -39,12 +50,12 @@ RESOURCE_TYPE_LABELS: dict[str, str] = {
     "kb": "知识库",
     "document": "文档",
     "platform": "平台功能",
+    "project_permission": "项目权限数据",
 }
 
 # ══════════════════════════════════════════════════════════════
 # 辅助函数
 # ══════════════════════════════════════════════════════════════
-
 
 
 def _prefix_map(project_id: str | None = None) -> dict[str, str]:
@@ -61,7 +72,7 @@ def _prefix_map(project_id: str | None = None) -> dict[str, str]:
 
     mapping: dict[str, str] = {}
     for resource_type in index.visible_resources(project_id):
-        for action in index.resource_actions[resource_type]:
+        for action in index.actions_for_resource(resource_type, project_id):
             if ":" not in action:
                 continue
             prefix = action.split(":")[0]

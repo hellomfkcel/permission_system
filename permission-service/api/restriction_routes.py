@@ -1,7 +1,4 @@
-"""管理台 API — 封禁/限制管理。
-
-设计依据：docs/外部系统设计.md §2.4.4 管理台专用 API + §2.3.1 restrictions 表。
-"""
+"""管理台 API — 封禁/限制管理。"""
 
 import uuid
 from datetime import datetime, timezone
@@ -14,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from models.restriction import Restriction
 from services.event_publisher import get_event_publisher
-from api.auth_routes import get_current_admin, get_project_scope, ProjectScope, require_platform_permission
+from api.auth_routes import assert_project_scope, get_current_admin, get_project_scope, ProjectScope, require_platform_permission
 from schemas.responses import Principal
 
 router = APIRouter(prefix="/api/v1/restrictions", tags=["admin-restrictions"])
@@ -94,7 +91,7 @@ async def add_restriction(
     )
     db.add(restriction)
 
-    # ★ Outbox 模式（设计依据 §3.2）：
+    # Outbox 模式：
     # 在同一事务内写封禁 + permission_changes，原子提交
     publisher = get_event_publisher()
     # 对于型一封禁(subject_ban)，resource 信息用 principal 标识
@@ -105,6 +102,7 @@ async def add_restriction(
         tenant_id=body.tenant_id,
         resource_type=res_type,
         resource_id=res_id,
+        project_id=body.project_id,
         event_type="RESTRICTION_ADDED",
         change_detail={
             "action": "restriction_added",
@@ -166,7 +164,7 @@ async def remove_restriction(
     restriction.removed = True
     restriction.removed_at = datetime.now(timezone.utc)
 
-    # ★ Outbox 模式（设计依据 §3.2）：
+    # Outbox 模式：
     # 在同一事务内写封禁解除 + permission_changes，原子提交
     res_type = restriction.resource_type or "kb"
     res_id = restriction.resource_id or restriction.principal or ""
@@ -176,6 +174,7 @@ async def remove_restriction(
         tenant_id=restriction.tenant_id,
         resource_type=res_type,
         resource_id=res_id,
+        project_id=restriction.project_id,
         event_type="RESTRICTION_REMOVED",
         change_detail={
             "action": "restriction_removed",
@@ -224,6 +223,7 @@ async def list_restrictions(
 
     # 项目范围过滤
     if project_id:
+        assert_project_scope(scope, project_id)
         conditions.append(Restriction.project_id == project_id)
     elif not scope.is_platform_admin:
         scope_filter = scope.filter_condition(Restriction)

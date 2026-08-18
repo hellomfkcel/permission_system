@@ -1,7 +1,4 @@
-"""租户管理 API — CRUD + 成员管理。
-
-设计依据：docs/tenant_design.md §3.2 API 设计。
-"""
+"""租户管理 API — CRUD + 成员管理。"""
 
 import uuid
 from datetime import datetime, timezone
@@ -24,7 +21,7 @@ from schemas.tenant_responses import (
     TenantMemberListResponse,
     UserTenantsResponse,
 )
-from api.auth_routes import get_current_admin
+from api.auth_routes import get_current_admin, require_platform_permission
 
 router = APIRouter(prefix="/api/v1/tenants", tags=["admin-tenants"])
 
@@ -84,6 +81,7 @@ async def create_tenant(
     body: CreateTenantRequest,
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(get_current_admin),
+    _perm: None = Depends(require_platform_permission("tenant_mgmt", "platform:write")),
 ) -> TenantResponse:
     """创建新租户。
 
@@ -154,6 +152,7 @@ async def create_tenant(
 async def list_tenants(
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(get_current_admin),
+    _perm: None = Depends(require_platform_permission("tenant_mgmt", "platform:read")),
     status: str | None = Query(None, description="筛选状态"),
     search: str | None = Query(None, description="搜索 ID 或名称"),
     limit: int = Query(50, ge=1, le=200, description="每页条数"),
@@ -221,6 +220,7 @@ async def get_tenant(
     tenant_id: str,
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(get_current_admin),
+    _perm: None = Depends(require_platform_permission("tenant_mgmt", "platform:read")),
 ) -> TenantResponse:
     """获取单个租户详情。需要管理员认证。"""
     tenant = await _get_tenant_or_404(db, tenant_id)
@@ -234,6 +234,7 @@ async def update_tenant(
     body: UpdateTenantRequest,
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(get_current_admin),
+    _perm: None = Depends(require_platform_permission("tenant_mgmt", "platform:write")),
 ) -> TenantResponse:
     """更新租户信息（需 tenant_admin 或 system_admin）。
 
@@ -261,6 +262,7 @@ async def delete_tenant(
     tenant_id: str,
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(get_current_admin),
+    _perm: None = Depends(require_platform_permission("tenant_mgmt", "platform:write")),
 ) -> None:
     """软删除租户（status=deleted）。
 
@@ -300,6 +302,7 @@ async def list_tenant_members(
     tenant_id: str,
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(get_current_admin),
+    _perm: None = Depends(require_platform_permission("tenant_mgmt", "platform:read")),
     include_revoked: bool = Query(False, description="是否包含已移除的成员"),
 ) -> TenantMemberListResponse:
     """获取租户成员列表。需要管理员认证。"""
@@ -331,6 +334,7 @@ async def add_tenant_member(
     body: AddTenantMemberRequest,
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(get_current_admin),
+    _perm: None = Depends(require_platform_permission("tenant_mgmt", "platform:write")),
 ) -> TenantMemberResponse:
     """将用户加入租户。
 
@@ -385,6 +389,7 @@ async def remove_tenant_member(
     user_id: str,
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(get_current_admin),
+    _perm: None = Depends(require_platform_permission("tenant_mgmt", "platform:write")),
 ) -> None:
     """将用户从租户移除（revoked=true）。"""
     await _get_tenant_or_404(db, tenant_id)
@@ -415,6 +420,7 @@ async def get_user_tenants(
     user_id: str,
     db: AsyncSession = Depends(get_db),
     admin: dict = Depends(get_current_admin),
+    _perm: None = Depends(require_platform_permission("tenant_mgmt", "platform:read")),
 ) -> UserTenantsResponse:
     """获取用户所属的所有活跃租户。需要管理员认证。"""
     # 查询用户的所有活跃绑定

@@ -1,7 +1,4 @@
-"""租户管理 — 响应 Pydantic 模型。
-
-设计依据：docs/tenant_design.md §3.2.1 + §3.2.2。
-"""
+"""租户管理 — 响应 Pydantic 模型。"""
 
 from pydantic import BaseModel, Field
 

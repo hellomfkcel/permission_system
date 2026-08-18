@@ -1,7 +1,5 @@
 /**
  * API 客户端 — Axios 实例，baseURL 指向权限服务后端。
- *
- * 设计依据：docs/外部系统设计.md §3.2 管理台技术选型。
  */
 
 import axios from "axios";

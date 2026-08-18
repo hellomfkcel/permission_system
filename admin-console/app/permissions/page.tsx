@@ -1,7 +1,6 @@
 /** 权限管理 — ACL 授予/回收 + 角色绑定。
  *
  * 使用 PermissionGrantDialog 和 RoleBindingManager 组件。
- * 设计依据：docs/外部系统设计.md §3.3 + §3.4.1。
  */
 
 "use client";

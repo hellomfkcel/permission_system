@@ -1,9 +1,8 @@
 """项目管理 API — 项目/客户端/API Key/受众 CRUD。
 
-Phase 1: 将硬编码注册表迁移为 DB 驱动的项目管理。
+将硬编码注册表迁移为 DB 驱动的项目管理。
 所有端点需要 system_admin 认证。
 
-设计依据：独立权限平台升级方案 Phase 1。
 """
 
 import hashlib
@@ -17,7 +16,13 @@ from sqlalchemy import select, func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from api.auth_routes import get_current_admin, require_project_member, require_platform_admin, require_platform_permission
+from api.auth_routes import (
+    get_current_admin,
+    require_project_admin,
+    require_project_member,
+    require_platform_admin,
+    require_platform_permission,
+)
 from schemas.responses import Principal
 from models.project import Project, ProjectClient, ProjectApiKey, ProjectAudience
 
@@ -162,7 +167,7 @@ async def create_project(
     p = Project(id=body.id, name=body.name, description=body.description)
     db.add(p)
 
-    # ★ 自动将创建者添加为 project_admin
+    # 自动将创建者添加为 project_admin
     from models.project import ProjectMember
     db.add(ProjectMember(
         project_id=body.id,
@@ -226,8 +231,9 @@ async def add_project_client(
     body: CreateClientRequest,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    _check: None = Depends(require_project_admin("project_id")),
 ) -> ProjectClientOut:
-    """为项目注册新的 client_id。"""
+    """为项目注册新的 client_id。需要本项目的 project_admin（或平台管理员）。"""
     existing = await db.scalar(
         select(ProjectClient).where(
             ProjectClient.project_id == project_id,
@@ -257,8 +263,9 @@ async def remove_project_client(
     client_id: str,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    _check: None = Depends(require_project_admin("project_id")),
 ) -> None:
-    """删除项目的 client_id 注册。"""
+    """删除项目的 client_id 注册。需要本项目的 project_admin（或平台管理员）。"""
     pc = await db.scalar(
         select(ProjectClient).where(
             ProjectClient.project_id == project_id,
@@ -283,8 +290,9 @@ async def list_project_api_keys(
     project_id: str,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    _check: None = Depends(require_project_member("project_id")),
 ) -> list[ProjectApiKeyOut]:
-    """列出项目的 API Keys（不返回原始 key）。"""
+    """列出项目的 API Keys（不返回原始 key）。需要该项目成员。"""
     rows = await db.execute(
         select(ProjectApiKey).where(ProjectApiKey.project_id == project_id)
         .order_by(ProjectApiKey.created_at.desc())
@@ -307,8 +315,13 @@ async def create_project_api_key(
     body: CreateApiKeyRequest,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    _check: None = Depends(require_project_admin("project_id")),
 ) -> ProjectApiKeyCreated:
-    """为项目签发新的 API Key。
+    """为项目签发新的 API Key。需要本项目的 project_admin（或平台管理员）。
+
+    API Key 是 /v1 外部鉴权凭证，签发即等于放行以该项目身份调用判定链路。范围严格收口
+    在路径里的 {project_id}：项目管理员只能给自己项目签发，只读成员不可、别项目的管理员
+    也不可，杜绝借此为其它项目铸造凭证造成跨项目越权。
 
     返回原始 key —— 仅此一次，之后不可获取。
     """
@@ -343,8 +356,9 @@ async def revoke_project_api_key(
     key_id: str,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    _check: None = Depends(require_project_admin("project_id")),
 ) -> dict:
-    """吊销 API Key。"""
+    """吊销 API Key。需要本项目的 project_admin（或平台管理员）。"""
     try:
         kid = uuid.UUID(key_id)
     except ValueError:
@@ -378,8 +392,9 @@ async def list_project_audiences(
     project_id: str,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    _check: None = Depends(require_project_member("project_id")),
 ) -> list[ProjectAudienceOut]:
-    """列出项目的 ctx_token 受众。"""
+    """列出项目的 ctx_token 受众。需要该项目成员。"""
     rows = await db.execute(
         select(ProjectAudience).where(ProjectAudience.project_id == project_id)
     )
@@ -395,8 +410,9 @@ async def add_project_audience(
     body: CreateAudienceRequest,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    _check: None = Depends(require_project_admin("project_id")),
 ) -> ProjectAudienceOut:
-    """为项目注册新的 ctx_token audience。"""
+    """为项目注册新的 ctx_token audience。需要本项目的 project_admin（或平台管理员）。"""
     existing = await db.scalar(
         select(ProjectAudience).where(
             ProjectAudience.project_id == project_id,
@@ -483,8 +499,9 @@ async def remove_project_audience(
     audience: str,
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    _check: None = Depends(require_project_admin("project_id")),
 ) -> None:
-    """删除项目的 audience 注册。"""
+    """删除项目的 audience 注册。需要本项目的 project_admin（或平台管理员）。"""
     pa = await db.scalar(
         select(ProjectAudience).where(
             ProjectAudience.project_id == project_id,
@@ -582,8 +599,16 @@ async def remove_project_member(
     admin: Principal = Depends(get_current_admin),
     _check: None = Depends(require_project_member("project_id")),
 ) -> None:
-    """移除项目成员。不能移除自己。"""
+    """移除项目成员。需要 project_admin 权限；不能移除自己。"""
     from models.project import ProjectMember as PM
+
+    # 检查移除者权限：仅项目管理员（或平台管理员）可增删成员，
+    # 与 add_project_member 同口径 —— 否则只读成员也能改成员表。
+    remover_role = await db.scalar(
+        select(PM.role).where(PM.project_id == project_id, PM.user_id == admin.user_id)
+    )
+    if remover_role != "project_admin" and "platform_admin" not in admin.roles:
+        raise HTTPException(status_code=403, detail="Only project_admin can remove members")
 
     if user_id == admin.user_id:
         raise HTTPException(status_code=422, detail="Cannot remove yourself from the project")

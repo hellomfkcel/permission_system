@@ -1,7 +1,4 @@
-"""管理台认证 API — JWT 验证 + Keycloak 同步触发 + 管理台 API 鉴权依赖。
-
-设计依据：docs/外部系统设计.md §4 与 IdP 集成 + frontend-design.md §0 认证与租户。
-"""
+"""管理台认证 API — JWT 验证 + Keycloak 同步触发 + 管理台 API 鉴权依赖。"""
 
 from fastapi import APIRouter, HTTPException, Depends, Header, Query
 from app.config import settings
@@ -27,7 +24,7 @@ router = APIRouter(prefix="/api/v1/auth", tags=["admin-auth"])
 # ══════════════════════════════════════════════════════════════
 
 
-# ── 管理员角色名（设计依据 §2.2 角色层级）──
+# 管理员角色名
 _ADMIN_ROLES: set[str] = {"system_admin", "admin"}
 _PLATFORM_ADMIN_ROLE = "platform_admin"
 
@@ -93,7 +90,7 @@ async def get_current_admin(
 
     所有管理台写操作 (grant/revoke/bind/unbind/add restriction) 须通过此依赖注入。
 
-    Phase 4: 项目级隔离。返回的 Principal 包含 admin_project_ids 属性。
+    项目级隔离。返回的 Principal 包含 admin_project_ids 属性。
 
     Raises:
         401: 未提供 token 或 token 无效/过期。
@@ -114,7 +111,7 @@ async def get_current_admin(
             detail=f"Invalid or expired admin token: {str(e)}",
         ) from e
 
-    # P0-1: 验证访问权限
+    # 验证访问权限
     # 优先检查 JWT 角色（system_admin/admin/platform_admin → 直接通过）
     if _ADMIN_ROLES.intersection(principal.roles) or _PLATFORM_ADMIN_ROLE in principal.roles:
         return principal
@@ -150,14 +147,26 @@ async def get_current_admin(
 async def require_platform_admin(
     admin: Principal = Depends(get_current_admin),
 ) -> Principal:
-    """依赖注入 — 仅 platform_admin 可通过。
+    """依赖注入 — 项目创建/删除等平台级写操作。
 
-    用于: 项目创建/删除等平台级操作。
+    判定同样交给 Cerbos：project_mgmt 模块上的 platform:write。
     """
-    if _PLATFORM_ADMIN_ROLE not in admin.roles:
+    from app.database import async_session
+    from services.platform_authorizer import PlatformAuthorizationUnavailable
+
+    async with async_session() as db:
+        try:
+            perms = await _get_platform_permissions(db, admin.user_id, admin.roles)
+        except PlatformAuthorizationUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Authorization service unavailable; request denied.",
+            ) from exc
+
+    if "platform:write" not in perms.get("project_mgmt", []):
         raise HTTPException(
             status_code=403,
-            detail="platform_admin role required for this operation.",
+            detail="Insufficient platform permission: platform:write on project_mgmt",
         )
     return admin
 
@@ -208,6 +217,57 @@ def require_project_member(project_id_param: str = "project_id"):
     return _check  # 返回函数本身，让端点参数层的 Depends() 来包装
 
 
+def require_project_admin(project_id_param: str = "project_id"):
+    """FastAPI 依赖工厂 — 校验当前主体是该项目的项目管理员（或平台管理员）。
+
+    比 require_project_member 更严：不仅要在 project_members 里，角色还须为 project_admin。
+    用于项目自助 provisioning（本项目的 client / API Key / audience 增删）—— 项目管理员可管
+    自己项目，只读成员不可，别项目的管理员也不可（按路径里的 {project_id} 收口）。
+
+    平台级身份（system_admin / admin / platform_admin，见 _is_platform_wide）直接通过。
+    project_members.user_id 可能存用户名或 Keycloak UUID，两种都要匹配。
+    """
+    from fastapi import Request
+
+    async def _check(
+        request: Request,
+        admin: Principal = Depends(get_current_admin),
+    ) -> None:
+        if _is_platform_wide(admin.roles):
+            return
+
+        project_id_val = request.path_params.get(project_id_param, "")
+        if not project_id_val:
+            raise HTTPException(status_code=400, detail="Missing project_id")
+
+        from app.database import async_session
+        from sqlalchemy import select
+        from models.project import ProjectMember
+        from models.user_cache import UserCache
+
+        async with async_session() as db:
+            candidates = {admin.user_id}
+            alias = await db.scalar(
+                select(UserCache.user_id).where(UserCache.username == admin.user_id)
+            )
+            if alias:
+                candidates.add(alias)
+
+            role = await db.scalar(
+                select(ProjectMember.role).where(
+                    ProjectMember.project_id == project_id_val,
+                    ProjectMember.user_id.in_(candidates),
+                )
+            )
+            if role != "project_admin":
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Only a project_admin of '{project_id_val}' may perform this action.",
+                )
+
+    return _check
+
+
 class ProjectScope:
     """当前管理员的项目访问范围。
 
@@ -215,7 +275,6 @@ class ProjectScope:
     - is_platform_admin=True → 可访问全部项目
     - project_ids 为空集 → 无项目归属，看不到任何项目数据
     """
-
     def __init__(self, project_ids: set[str] | None, is_platform_admin: bool):
         self._project_ids = project_ids
         self.is_platform_admin = is_platform_admin
@@ -274,6 +333,20 @@ async def get_project_scope(
     )
 
 
+def assert_project_scope(scope: ProjectScope, project_id: str | None) -> None:
+    """读端点显式指定 project_id 时的范围校验。
+
+    模块级 require_platform_permission 只回答"能不能进这个模块"，回答不了
+    "能不能看这个项目"。列表/详情端点若允许 project_id 直接落进过滤条件而不校验
+    范围，项目管理员就能对别的项目取数——写端点已用 scope.can_access 挡住，这里
+    对读端点补齐同一道校验。project_id 为空表示按管理员自身范围过滤，无需校验。
+    """
+    if project_id and not scope.can_access(project_id):
+        raise HTTPException(
+            status_code=403, detail=f"No access to project '{project_id}'"
+        )
+
+
 # ══════════════════════════════════════════════════════════════
 # 平台功能权限依赖（Phase 2a：平台级权限管理）
 # ══════════════════════════════════════════════════════════════
@@ -281,92 +354,47 @@ async def get_project_scope(
 
 async def _get_platform_permissions(
     db: AsyncSession, user_id: str, roles: list[str],
+    scope_project_id: str | None = None,
 ) -> dict[str, list[str]]:
     """查询当前管理员对平台功能的权限映射。
 
     返回 {feature_id: [actions]}，如 {"audit_mgmt": ["platform:read"]}。
+
+    唯一判定路径：结果全部来自 Cerbos 对 platform.yaml 的判定
+    （services/platform_authorizer.py），本函数不做任何角色名判断。
+
+    scope_project_id 指定时，项目成员角色只按该项目解析（跨项目按角色降级）。
     """
-    from app.platform_features import PLATFORM_FEATURES
+    from services.platform_authorizer import resolve_platform_permissions
 
-    permissions: dict[str, list[str]] = {}
+    return await resolve_platform_permissions(db, user_id, roles, scope_project_id)
 
-    # platform_admin JWT 角色 → 全部功能 + 全部权限
-    if _PLATFORM_ADMIN_ROLE in roles or "system_admin" in roles or "admin" in roles:
-        for fid in PLATFORM_FEATURES:
-            permissions[fid] = ["platform:read", "platform:write"]
-        return permissions
 
-    # 查询 platform 资源的 ACL
-    from sqlalchemy import or_
-    from models.acl import ACLEntry
-    principals_to_check = [f"user:{user_id}"]
-    if "system_admin" in roles:
-        principals_to_check.append("role:system_admin")
-    if "admin" in roles:
-        principals_to_check.append("role:admin")
+async def _target_project_id(request: "Request") -> str | None:
+    """取本次请求要操作的项目 ID：优先 query，其次 JSON / 表单 body。
 
-    acl_stmt = select(ACLEntry).where(
-        ACLEntry.resource_type == "platform",
-        ACLEntry.principal.in_(principals_to_check),
-        ACLEntry.revoked == False,  # noqa: E712
-    )
-    acl_result = await db.execute(acl_stmt)
-    for entry in acl_result.scalars():
-        if entry.resource_id not in permissions:
-            permissions[entry.resource_id] = []
-        if entry.action not in permissions[entry.resource_id]:
-            permissions[entry.resource_id].append(entry.action)
-
-    # 查询平台角色绑定（project_id IS NULL 的角色）
-    from models.role_binding import RoleBinding
-    rb_stmt = select(RoleBinding).where(
-        RoleBinding.principal.in_(principals_to_check),
-        RoleBinding.project_id.is_(None),
-        RoleBinding.revoked == False,  # noqa: E712
-    )
-    rb_result = await db.execute(rb_stmt)
-    platform_roles: set[str] = {rb.role for rb in rb_result.scalars()}
-
-    # platform_admin 角色绑定 → 全部权限
-    if "platform_admin" in platform_roles:
-        for fid in PLATFORM_FEATURES:
-            permissions[fid] = ["platform:read", "platform:write"]
-        return permissions
-
-    # platform_viewer → 全部功能的 platform:read
-    if "platform_viewer" in platform_roles:
-        for fid in PLATFORM_FEATURES:
-            if fid not in permissions:
-                permissions[fid] = []
-            if "platform:read" not in permissions[fid]:
-                permissions[fid].append("platform:read")
-
-    # platform_auditor → 仅审计日志和策略模拟的 platform:read
-    if "platform_auditor" in platform_roles:
-        for fid in ("audit_mgmt", "playground", "dashboard"):
-            if fid not in permissions:
-                permissions[fid] = []
-            if "platform:read" not in permissions[fid]:
-                permissions[fid].append("platform:read")
-
-    # 项目成员回退：在 project_members 表中但无平台角色 → 授予基本只读权限
-    # 注意：project_members.user_id 可能是 UUID，需要从 user_cache 反查
-    from models.project import ProjectMember
-    from models.user_cache import UserCache as _UC
-    is_member = await db.scalar(
-        select(ProjectMember.id).where(ProjectMember.user_id == user_id)
-    )
-    if not is_member:
-        uc_id = await db.scalar(select(_UC.user_id).where(_UC.username == user_id))
-        if uc_id:
-            is_member = await db.scalar(
-                select(ProjectMember.id).where(ProjectMember.user_id == uc_id)
-            )
-    if is_member and not permissions:
-        for fid in ("dashboard", "resource_mgmt", "user_mgmt", "role_mgmt"):
-            permissions[fid] = ["platform:read"]
-
-    return permissions
+    用于把模块准入判定收口到"这个请求针对的那个项目"上——否则模块准入用的是
+    跨项目角色并集，"在别的项目是管理员"会漏进来（G9）。body 读取依赖 Starlette
+    对已读 body/form 的缓存，处理函数随后仍能正常解析同一份 body。
+    """
+    pid = request.query_params.get("project_id")
+    if pid:
+        return pid
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        ctype = request.headers.get("content-type", "")
+        try:
+            if "application/json" in ctype:
+                body = await request.json()
+                if isinstance(body, dict):
+                    val = body.get("project_id")
+                    return val if isinstance(val, str) and val else None
+            elif "form-data" in ctype or "x-www-form-urlencoded" in ctype:
+                form = await request.form()
+                val = form.get("project_id")
+                return val if isinstance(val, str) and val else None
+        except Exception:
+            return None
+    return None
 
 
 def require_platform_permission(feature_id: str, action: str = "platform:read"):
@@ -380,29 +408,43 @@ def require_platform_permission(feature_id: str, action: str = "platform:read"):
         ):
             ...
 
-    platform_admin/system_admin/admin JWT 角色 → 直接通过（不查 DB）。
-    其他管理员 → 查询 platform ACL 和平台角色绑定。
+    判定完全交给 Cerbos：角色能进哪些模块写在 platform.yaml 里，这里不做任何
+    角色名判断，也不设"管理员直接放行"的快捷分支。
+    Cerbos 不可达时 fail-closed 返回 503，不回退到本地推断。
     """
+    from fastapi import Request
+
     async def _check(
+        request: Request,
         admin: Principal = Depends(get_current_admin),
     ) -> None:
-        # 管理员角色直接通过（platform_admin, system_admin, admin）
-        if _ADMIN_ROLES.intersection(admin.roles) or _PLATFORM_ADMIN_ROLE in admin.roles:
-            return
-
-        # 查询平台权限
         from app.database import async_session
+        from services.platform_authorizer import PlatformAuthorizationUnavailable
+
+        scope_project_id = await _target_project_id(request)
+
         async with async_session() as db:
-            perms = await _get_platform_permissions(db, admin.user_id, admin.roles)
-            actions = perms.get(feature_id, [])
-            if action not in actions:
-                # platform:write 隐含 platform:read
-                if action == "platform:read" and "platform:write" in actions:
-                    return
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Insufficient platform permission: {action} on {feature_id}",
+            try:
+                perms = await _get_platform_permissions(
+                    db, admin.user_id, admin.roles, scope_project_id,
                 )
+            except PlatformAuthorizationUnavailable as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Authorization service unavailable; request denied.",
+                ) from exc
+
+        actions = perms.get(feature_id, [])
+        if action in actions:
+            return
+        # platform:write 隐含 platform:read（策略里两者分别授予，
+        # 此处只做包含关系的展开，不引入新的授权来源）
+        if action == "platform:read" and "platform:write" in actions:
+            return
+        raise HTTPException(
+            status_code=403,
+            detail=f"Insufficient platform permission: {action} on {feature_id}",
+        )
 
     return _check
 
@@ -430,11 +472,19 @@ async def get_my_platform_access(
     """
     from app.platform_features import PLATFORM_FEATURES
     from app.database import async_session
+    from services.platform_authorizer import PlatformAuthorizationUnavailable
 
     is_platform_admin = _is_platform_wide(admin.roles)
 
     async with async_session() as db:
-        perms = await _get_platform_permissions(db, admin.user_id, admin.roles)
+        try:
+            perms = await _get_platform_permissions(db, admin.user_id, admin.roles)
+        except PlatformAuthorizationUnavailable as exc:
+            # fail-closed：拿不到判定就不给任何功能，不回退到本地推断
+            raise HTTPException(
+                status_code=503,
+                detail="Authorization service unavailable; cannot resolve access.",
+            ) from exc
 
     # 项目列表
     project_ids_list: list[str] = []
@@ -809,6 +859,7 @@ async def sync_users_from_keycloak() -> SyncResult:
 async def list_cached_users(
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
     project_id: str | None = Query(None, description="按项目 ID 过滤用户（可选）"),
 ) -> list[UserInfo]:
     """查询用户列表。需要管理员认证。
@@ -816,7 +867,18 @@ async def list_cached_users(
     三级用户模型：租户 → 项目 → 用户
     - 平台模式（不传 project_id）：返回 user_cache 全部用户 + 租户归属 + 项目归属
     - 项目模式（传 project_id）：仅返回 project_members 中的项目成员
+
+    范围收口：全量用户目录是平台级视图，仅平台管理员可取；项目管理员须限定到自己
+    的项目，只能看该项目成员。
     """
+    if project_id:
+        assert_project_scope(scope, project_id)
+    elif not scope.is_platform_admin:
+        raise HTTPException(
+            status_code=400,
+            detail="project_id is required for non-platform administrators.",
+        )
+
     from models.tenant import TenantMembership, Tenant
     from models.project import ProjectMember as _PM
     from sqlalchemy import func as sa_func
@@ -1039,6 +1101,7 @@ _RESTRICTION_LABELS: dict[str, str] = {
 async def get_dashboard_stats(
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
     project_id: str | None = Query(None, description="按项目 ID 过滤统计（可选）"),
 ) -> DashboardStats:
     """Dashboard 数据驱动概览统计。需要管理员认证。
@@ -1050,8 +1113,19 @@ async def get_dashboard_stats(
       - project_count = 0
       - resource_stats = 仅该项目的资源统计
 
+    范围收口：显式 project_id 必须在管理员范围内；跨项目汇总（不传 project_id）仅
+    平台管理员可用，项目管理员须限定到自己的项目，避免读到别项目的统计。
+
     所有统计走 GROUP BY 动态查询，新增资源类型无需修改代码。
     """
+    if project_id:
+        assert_project_scope(scope, project_id)
+    elif not scope.is_platform_admin:
+        raise HTTPException(
+            status_code=400,
+            detail="project_id is required for non-platform administrators.",
+        )
+
     from models.resource import ResourceRegistry
     from models.acl import ACLEntry
     from models.restriction import Restriction
@@ -1172,23 +1246,8 @@ async def get_dashboard_stats(
 
 
 # ══════════════════════════════════════════════════════════════
-# 系统配置端点（P1-6：动态配置暴露，替代 Settings 页面硬编码）
+# 系统配置端点
 # ══════════════════════════════════════════════════════════════
-
-
-async def filter_by_project_scope(
-    admin: Principal,
-    db: AsyncSession,
-) -> set[str] | None:
-    """返回当前管理员可访问的项目 ID 集合。
-
-    None = platform_admin，不设过滤。
-    空集 = 普通管理员但无项目归属，看不到任何数据。
-    """
-    project_ids = await get_admin_project_ids(admin.user_id, admin.roles)
-    if project_ids is not None and len(project_ids) == 0:
-        return set()  # 无项目归属的普通管理员
-    return project_ids  # None (platform_admin) 或项目ID集合
 
 
 class SystemConfigResponse(BaseModel):
@@ -1247,30 +1306,49 @@ def _get_resource_type_labels() -> dict[str, str]:
 @router.get("/config", response_model=SystemConfigResponse)
 async def get_system_config(
     admin: Principal = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
     project_id: str | None = Query(None, description="按项目过滤自定义资源类型（不传=全部）"),
 ) -> SystemConfigResponse:
-    """返回系统运行时配置（管理台 Settings 页面动态展示）。需要管理员认证。
+    """返回系统运行时配置。需要管理员认证。
 
-    project_id 由前端 API 拦截器自动注入（从 localStorage admin_current_project 读取）。
-    - 平台模式（不传）：resource_actions 包含全部项目的自定义资源类型
-    - 项目模式（传 project_id）：resource_actions 仅包含该项目的自定义类型 + 内置类型
+    此端点服务两类调用方，权限不同：
+    - Settings 页面（平台专属）：service_port / cerbos_pdp_url / keycloak_* /
+      rate_limits / derived_roles_count / resource_rules 等运行时内部配置，
+      仅在调用方具备 settings:platform:read 时返回，否则脱敏为空。
+    - 权限授予对话框（项目管理员也用）：resource_actions / resource_type_labels /
+      platform_features 资源目录，始终返回 —— 不能因缺 settings 权限而切断
+      项目管理员的授权链路。
 
-    P1-6 修复：替代 Settings 页面中硬编码的端口号、限流值、策略规则数。
+    project_id 由前端 API 拦截器注入，决定 resource_actions 的项目作用域。
     """
+    from services.platform_authorizer import (
+        PlatformAuthorizationUnavailable,
+        resolve_platform_permissions,
+    )
+
+    can_see_settings = False
+    try:
+        perms = await resolve_platform_permissions(db, admin.user_id, admin.roles)
+        acts = perms.get("settings", [])
+        can_see_settings = "platform:read" in acts or "platform:write" in acts
+    except PlatformAuthorizationUnavailable:
+        can_see_settings = False
+
+    empty_limits: dict[str, str] = {}
     return SystemConfigResponse(
-        service_port=settings.port,
-        cerbos_pdp_url=settings.cerbos_pdp_url,
-        keycloak_server_url=settings.keycloak_server_url,
-        keycloak_realm=settings.keycloak_realm,
+        service_port=settings.port if can_see_settings else 0,
+        cerbos_pdp_url=settings.cerbos_pdp_url if can_see_settings else "",
+        keycloak_server_url=settings.keycloak_server_url if can_see_settings else "",
+        keycloak_realm=settings.keycloak_realm if can_see_settings else "",
         rate_limits={
             "check": f"{settings.check_rate_limit}/s",
             "check_batch": f"{settings.check_batch_rate_limit}/s",
             "filter": f"{settings.filter_rate_limit}/s",
             "prefilter": f"{settings.prefilter_rate_limit}/s",
             "visibility": f"{settings.visibility_rate_limit}/s",
-        },
-        derived_roles_count=_count_derived_roles(),
-        resource_rules=sorted(VALID_ACTIONS),
+        } if can_see_settings else empty_limits,
+        derived_roles_count=_count_derived_roles() if can_see_settings else 0,
+        resource_rules=sorted(VALID_ACTIONS) if can_see_settings else [],
         resource_actions=_get_resource_actions(project_id),
         resource_type_labels=_get_resource_type_labels(),
         platform_features=_get_platform_features(),
@@ -1278,7 +1356,7 @@ async def get_system_config(
 
 
 # ══════════════════════════════════════════════════════════════
-# 最近变更时间线端点（P1-7：Dashboard 时间线 + 告警面板）
+# 最近变更时间线端点
 # ══════════════════════════════════════════════════════════════
 
 
@@ -1302,23 +1380,34 @@ class RecentChangesResponse(BaseModel):
 async def get_recent_changes(
     db: AsyncSession = Depends(get_db),
     admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
     limit: int = Query(20, description="返回条数上限"),
     project_id: str | None = Query(None, description="按项目 ID 过滤变更（可选）"),
 ) -> RecentChangesResponse:
     """返回最近权限变更时间线和待处理告警。需要管理员认证。
 
     项目模式下通过 change_detail JSONB 中的 project_id 过滤。
+
+    范围收口：变更时间线是行级数据（含 principal），与审计查询同口径按项目范围过滤 ——
+    显式 project_id 须在范围内；项目管理员不传时只看自己项目的变更；无项目归属看不到。
     """
     from models.change_log import PermissionChange
     from models.acl import ACLEntry
     from sqlalchemy import func as sa_func
 
-    # ── 最近变更（按版本降序）──
+    # ── 最近变更（按版本降序，叠加项目范围过滤）──
+    pid_col = PermissionChange.change_detail["project_id"].astext
     changes_conditions = []
     if project_id:
-        changes_conditions.append(
-            PermissionChange.change_detail["project_id"].astext == project_id
-        )
+        assert_project_scope(scope, project_id)
+        changes_conditions.append(pid_col == project_id)
+    elif not scope.is_platform_admin:
+        pids = scope.project_ids or set()
+        if not pids:
+            from sqlalchemy import false
+            changes_conditions.append(false())
+        else:
+            changes_conditions.append(pid_col.in_(pids))
     stmt = (
         select(PermissionChange)
         .where(*changes_conditions)

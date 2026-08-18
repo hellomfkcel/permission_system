@@ -1,12 +1,16 @@
 """挂载关系表。
 
-设计依据：docs/外部系统设计.md §2.3.1 mount_registry 表定义。
+项目隔离：resource_registry 的唯一性是 (project_id, resource_type, resource_id)，
+即不同项目允许使用相同的资源 ID，因此挂载关系也必须按项目隔离 —— 否则一个项目的
+doc_id/kb_id 组合会命中另一个项目的挂载记录。
 """
 
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Boolean, DateTime, func, UniqueConstraint
+from sqlalchemy import (
+    String, Boolean, DateTime, ForeignKey, Index, UniqueConstraint, func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -19,6 +23,10 @@ class MountRegistry(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id"), nullable=False,
+        comment="所属项目 ID。挂载关系永远属于某个项目，无平台级挂载。",
+    )
     doc_id: Mapped[str] = mapped_column(String(255), nullable=False)
     kb_id: Mapped[str] = mapped_column(String(255), nullable=False)
     unlinked: Mapped[bool] = mapped_column(default=False)
@@ -30,5 +38,7 @@ class MountRegistry(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("doc_id", "kb_id", name="uq_doc_kb"),
+        UniqueConstraint("project_id", "doc_id", "kb_id", name="uq_mount_project_doc_kb"),
+        Index("idx_mount_project_doc", "project_id", "doc_id"),
+        Index("idx_mount_project_kb", "project_id", "kb_id"),
     )

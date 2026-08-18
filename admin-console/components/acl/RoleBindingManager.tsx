@@ -1,10 +1,5 @@
 /**
  * RoleBindingManager — 角色绑定管理组件。
- *
- * 设计依据：docs/外部系统设计.md §2.4.4 角色绑定管理
- *          + docs/权限管理系统架构设计.md §2.2 角色层级（Cerbos Derived Roles）
- *
- * 支持：角色绑定/解除、按主体/角色/资源范围筛选、批量查看。
  */
 
 "use client";

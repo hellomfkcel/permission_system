@@ -1,6 +1,4 @@
 /** 审计日志 — 使用 AuditLogViewer 组件。
- *
- * 设计依据：docs/外部系统设计.md §3.3 /audit 审计日志页面 + §5.1 事件系统设计。
  */
 
 "use client";

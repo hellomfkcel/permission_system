@@ -1,25 +1,67 @@
+# Layer 3 · rag-v14 · 知识库资源策略
+#
+# 动作权限矩阵：
+#   动作         kb_reader kb_writer kb_admin project_admin platform_admin_role
+#   kb:read          ✓        ✓        ✓          ✓             ✓
+#   kb:write         ✗        ✓        ✓          ✓             ✓
+#   kb:manage        ✗        ✗        ✓          ✓             ✓
+#   kb:grant         ✗        ✗        ✗          ✓             ✓
+#
+# kb 资源不设 ACL：ACL 只作用于文档实例级（见 document.yaml）。
+# kb:grant 只给 project_admin / platform_admin_role，kb_admin 不可向他人授权 ——
+# 否则单 KB 管理员可以把权限扩散到自己管辖范围之外。
 apiVersion: api.cerbos.dev/v1
 resourcePolicy:
   version: "default"
   resource: "kb"
   importDerivedRoles:
     - rag_roles
+
   rules:
-    - actions: ["kb:read"]
+    - name: "kb_read"
+      actions: ["kb:read"]
       effect: EFFECT_ALLOW
-      derivedRoles: ["kb_reader","kb_writer","kb_admin","admin"]
+      derivedRoles:
+        - kb_reader
+        - kb_writer
+        - kb_admin
+        - project_admin
+        - platform_admin_role
       condition:
         match:
           expr: request.resource.attr.retired == false
-    - actions: ["kb:write"]
+
+    - name: "kb_write"
+      actions: ["kb:write"]
       effect: EFFECT_ALLOW
-      derivedRoles: ["kb_writer","kb_admin","admin"]
+      derivedRoles:
+        - kb_writer
+        - kb_admin
+        - project_admin
+        - platform_admin_role
       condition:
         match:
           expr: request.resource.attr.retired == false
-    - actions: ["kb:manage"]
+
+    - name: "kb_manage"
+      actions: ["kb:manage"]
       effect: EFFECT_ALLOW
-      derivedRoles: ["kb_admin","admin"]
-    - actions: ["kb:grant"]
+      derivedRoles:
+        - kb_admin
+        - project_admin
+        - platform_admin_role
+      condition:
+        match:
+          expr: request.resource.attr.retired == false
+
+    - name: "kb_grant"
+      actions: ["kb:grant"]
       effect: EFFECT_ALLOW
-      derivedRoles: ["admin"]
+      derivedRoles:
+        - project_admin
+        - platform_admin_role
+      condition:
+        match:
+          expr: request.resource.attr.retired == false
+
+    # 其他情况：Cerbos 隐式拒绝。

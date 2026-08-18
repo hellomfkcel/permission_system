@@ -1,7 +1,4 @@
-"""管理台 API — ACL 权限授予/回收/查询。
-
-设计依据：docs/外部系统设计.md §2.4.4 管理台专用 API。
-"""
+"""管理台 API — ACL 权限授予/回收/查询。"""
 
 import csv
 import io
@@ -17,11 +14,9 @@ from app.database import get_db
 from models.acl import ACLEntry
 from models.role_binding import RoleBinding
 from services.event_publisher import get_event_publisher
-from api.auth_routes import get_current_admin, get_project_scope, ProjectScope, require_platform_permission
+from api.auth_routes import assert_project_scope, get_current_admin, get_project_scope, ProjectScope, require_platform_permission
 from schemas.responses import Principal
 from app.role_actions_config import (
-    VALID_ACTIONS,
-    VALID_RESOURCE_TYPES,
     get_valid_actions,
     get_valid_resource_types,
 )
@@ -35,12 +30,16 @@ router = APIRouter(prefix="/api/v1/acl", tags=["admin-acl"])
 class GrantRequest(BaseModel):
     tenant_id: str = Field(...)
     principal: str = Field(..., description="user:xxx | group:xxx | role:xxx")
-    resource_type: str = Field(..., description="kb | document")
+    resource_type: str = Field(..., description="kb | document | platform | ...")
     resource_id: str = Field(...)
-    action: str = Field(..., description="kb:read | doc:view | doc:download | ...")
+    action: str = Field(..., description="kb:read | doc:view | platform:read | ...")
     granted_by: str = Field(...)
     expires_at: str | None = Field(None, description="过期时间 ISO 8601")
-    project_id: str = Field(..., description="所属项目 ID")
+    project_id: str | None = Field(
+        None,
+        description="所属项目 ID。项目层资源必填；平台层资源（platform / "
+                    "project_permission）必须留空 —— 平台授权是平台级的。",
+    )
 
 
 class GrantResponse(BaseModel):
@@ -74,6 +73,102 @@ class ACLEntryOut(BaseModel):
     revoked: bool
 
 
+# ── 授权层级校验 ──
+
+
+async def _validate_grant_scope(
+    db: AsyncSession,
+    scope: ProjectScope,
+    resource_type: str,
+    action: str,
+    project_id: str | None,
+) -> str | None:
+    """校验授权记录与资源所在层级对齐，返回落库用的 project_id。
+
+    层级由策略文件所在的命名空间决定（唯一权威源，见 cerbos_policy_parser）：
+
+      平台层资源（platform / project_permission）
+        → 授权是平台级的，project_id 必须为空。
+          否则一条挂在某个项目下的 platform 授权会被平台判定路径读到，
+          等于用项目级权限换到了平台级权限。
+      项目层资源（kb / document / 各项目自定义类型）
+        → 必须带 project_id，且该项目要存在、在管理员范围内、
+          并且这个动作确实在该项目的策略里声明过。
+
+    Raises:
+        HTTPException 403/404/422
+    """
+    from services.cerbos_policy_parser import get_resource_layer
+    from app.role_actions_config import get_resource_actions
+
+    layer = get_resource_layer(resource_type)
+
+    if layer == "unknown":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unknown resource type '{resource_type}': no Cerbos policy declares it."
+            ),
+        )
+
+    if layer == "platform":
+        # 平台层 ACL 是把某个平台功能委托给非管理员，判定路径按 project_id IS NULL
+        # 读它 —— 生效范围是整个平台。只有平台管理员能签发；项目管理员虽然持有
+        # permission_mgmt 的写权限（用于管理自己项目的 ACL），但不得借此把项目级
+        # 权限兑换成平台级权限。
+        if not scope.is_platform_admin:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"'{resource_type}' is a platform-layer resource; only platform "
+                    "administrators may grant platform-scoped permissions."
+                ),
+            )
+        if project_id:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Resource type '{resource_type}' is a platform-layer resource; "
+                    "its grants are platform-scoped and must omit project_id."
+                ),
+            )
+        if action not in get_resource_actions(None).get(resource_type, []):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Action '{action}' is not declared for '{resource_type}'.",
+            )
+        return None
+
+    # ── 项目层 ──
+    if not project_id:
+        raise HTTPException(
+            status_code=422,
+            detail=f"project_id is required for project-layer resource '{resource_type}'.",
+        )
+    if not scope.can_access(project_id):
+        raise HTTPException(
+            status_code=403, detail=f"No access to project '{project_id}'"
+        )
+
+    from models.project import Project
+    proj = await db.scalar(select(Project.id).where(Project.id == project_id))
+    if not proj:
+        raise HTTPException(
+            status_code=404, detail=f"Project '{project_id}' not found"
+        )
+
+    declared = get_resource_actions(project_id).get(resource_type, [])
+    if action not in declared:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Action '{action}' is not declared for resource type "
+                f"'{resource_type}' in project '{project_id}'."
+            ),
+        )
+    return project_id
+
+
 # ── 端点 ──
 
 
@@ -89,25 +184,21 @@ async def grant_acl(
 
     流程：
     1. 验证管理员身份（JWT Bearer token）
-    2. 验证 project_id 在管理员的项目访问范围内
+    2. 校验授权层级与项目范围（_validate_grant_scope）
     3. 检查是否已有相同 active 记录
     4. INSERT acl_entries（granted_by 使用管理员身份）
     5. 递增 global_permission_version
     6. 发布 VisibilityChanged 事件
     """
-    # 验证项目访问权限
-    if not scope.can_access(body.project_id):
-        raise HTTPException(status_code=403, detail=f"No access to project '{body.project_id}'")
-
-    # 验证项目存在
-    from models.project import Project
-    proj = await db.scalar(select(Project.id).where(Project.id == body.project_id))
-    if not proj:
-        raise HTTPException(status_code=404, detail=f"Project '{body.project_id}' not found")
+    project_id = await _validate_grant_scope(
+        db, scope, body.resource_type, body.action, body.project_id,
+    )
 
     # 检查重复（唯一性按项目隔离，不同项目的同名资源互不冲突）
     stmt = select(ACLEntry).where(
-        ACLEntry.project_id == body.project_id,
+        ACLEntry.project_id.is_(None)
+        if project_id is None
+        else ACLEntry.project_id == project_id,
         ACLEntry.principal == body.principal,
         ACLEntry.resource_type == body.resource_type,
         ACLEntry.resource_id == body.resource_id,
@@ -128,7 +219,7 @@ async def grant_acl(
     new_id = uuid.uuid4()
     entry = ACLEntry(
         id=new_id,
-        project_id=body.project_id,
+        project_id=project_id,
         tenant_id=body.tenant_id,
         principal=body.principal,
         resource_type=body.resource_type,
@@ -139,7 +230,7 @@ async def grant_acl(
     )
     db.add(entry)
 
-    # ★ Outbox 模式（设计依据 §3.2）：
+    # Outbox 模式：
     # 在同一事务内写 ACL + permission_changes，原子提交
     publisher = get_event_publisher()
     kb_id = body.resource_id if body.resource_type == "kb" else None
@@ -148,12 +239,13 @@ async def grant_acl(
         tenant_id=body.tenant_id,
         resource_type=body.resource_type,
         resource_id=body.resource_id,
+        project_id=project_id,
         kb_id=kb_id,
         change_detail={
             "action": "acl_granted",
             "principal": body.principal,
             "permission": body.action,
-            "project_id": body.project_id,
+            "project_id": project_id,
         },
     )
     await db.commit()  # ACL + change_log 原子提交
@@ -167,7 +259,7 @@ async def grant_acl(
             "action": "acl_granted",
             "principal": body.principal,
             "permission": body.action,
-            "project_id": body.project_id,
+            "project_id": project_id,
         },
     )
 
@@ -214,13 +306,14 @@ async def revoke_acl(
     entry.revoked = True
     entry.revoked_at = datetime.now(timezone.utc)
 
-    # ★ Outbox 模式：同一事务内写 revoke + permission_changes
+    # Outbox 模式：同一事务内写 revoke + permission_changes
     publisher = get_event_publisher()
     version, change_id = await publisher.write_change_log(
         db,
         tenant_id=entry.tenant_id,
         resource_type=body.resource_type,
         resource_id=body.resource_id,
+        project_id=entry.project_id,
         change_detail={
             "action": "acl_revoked",
             "principal": body.principal,
@@ -271,6 +364,7 @@ async def list_acl(
     # 平台级条目（project_id=NULL）始终对所有管理员可见
     from sqlalchemy import or_
     if project_id:
+        assert_project_scope(scope, project_id)
         conditions.append(
             or_(ACLEntry.project_id == project_id, ACLEntry.project_id.is_(None))
         )
@@ -303,6 +397,79 @@ async def list_acl(
     ]
 
 
+# ── 资源实例 ACL 投影 ──
+
+
+class ResourceACLOut(BaseModel):
+    """判定期注入 Cerbos 的 resource.attr.acl / role_acl 原样投影。"""
+    resource_type: str
+    resource_id: str
+    acl: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="用户级：{principal: [action, ...]}，principal 含 user:/group: 前缀",
+    )
+    role_acl: dict[str, list[str]] = Field(
+        default_factory=dict, description="角色级：{role: [action, ...]}",
+    )
+
+
+@router.get("/resources/{resource_type}/{resource_id}", response_model=ResourceACLOut)
+async def get_resource_acl_view(
+    resource_type: str,
+    resource_id: str,
+    project_id: str | None = Query(None, description="按项目 ID 过滤"),
+    db: AsyncSession = Depends(get_db),
+    admin: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
+    _perm: None = Depends(require_platform_permission("permission_mgmt", "platform:read")),
+) -> ResourceACLOut:
+    """查看某个资源实例上的 ACL，即 Cerbos 判定时看到的 acl / role_acl。
+
+    这是 acl_entries 的一个只读投影，不是另一份存储：写入仍走
+    POST /api/v1/acl/grant，撤销走 /revoke。同一事实只有一处出处，
+    因此这里显示的内容与判定期使用的内容不可能不一致。
+
+    与 GET /api/v1/acl?resource_id=... 的区别：那个返回授权记录的原始行，
+    这个按 Cerbos 的注入格式分组（用户级 / 角色级），用于排查"为什么这条
+    ACL 没生效"。
+    """
+    if project_id and not scope.can_access(project_id):
+        raise HTTPException(
+            status_code=403, detail=f"No access to project '{project_id}'"
+        )
+
+    now = datetime.now(timezone.utc)
+    conditions = [
+        ACLEntry.resource_type == resource_type,
+        ACLEntry.resource_id == resource_id,
+        ACLEntry.revoked == False,  # noqa: E712
+        or_(ACLEntry.expires_at.is_(None), ACLEntry.expires_at > now),
+    ]
+    if project_id:
+        conditions.append(ACLEntry.project_id == project_id)
+
+    result = await db.execute(
+        select(ACLEntry.principal, ACLEntry.action).where(*conditions)
+    )
+
+    acl: dict[str, list[str]] = {}
+    role_acl: dict[str, list[str]] = {}
+    for entry_principal, action in result.fetchall():
+        if entry_principal.startswith("role:"):
+            bucket = role_acl.setdefault(entry_principal.split(":", 1)[1], [])
+        else:
+            bucket = acl.setdefault(entry_principal, [])
+        if action not in bucket:
+            bucket.append(action)
+
+    return ResourceACLOut(
+        resource_type=resource_type,
+        resource_id=resource_id,
+        acl={k: sorted(v) for k, v in sorted(acl.items())},
+        role_acl={k: sorted(v) for k, v in sorted(role_acl.items())},
+    )
+
+
 # ── 有效权限计算 ──
 
 
@@ -325,10 +492,7 @@ async def get_effective_permissions(
     scope: ProjectScope = Depends(get_project_scope),
     _perm: None = Depends(require_platform_permission("permission_mgmt", "platform:read")),
 ) -> list[EffectivePermission]:
-    """计算某主体对资源的有效权限（合并 ACL + 角色绑定 + 封禁）。需要管理员认证。
-
-    设计依据：docs/外部系统设计.md §2.4.4 ACL 管理 — 有效权限计算。
-    """
+    """计算某主体对资源的有效权限（合并 ACL + 角色绑定 + 封禁）。需要管理员认证。"""
     conditions = [ACLEntry.revoked == False]  # noqa: E712
     if principal:
         conditions.append(ACLEntry.principal == principal)
@@ -337,6 +501,7 @@ async def get_effective_permissions(
     if resource_id:
         conditions.append(ACLEntry.resource_id == resource_id)
     if project_id:
+        assert_project_scope(scope, project_id)
         conditions.append(
             or_(ACLEntry.project_id == project_id, ACLEntry.project_id.is_(None))
         )
@@ -354,27 +519,47 @@ async def get_effective_permissions(
     # 按 (principal, resource_type, resource_id) 聚合
     from collections import defaultdict
     grouped: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+    entry_projects: dict[tuple[str, str, str], str | None] = {}
     for e in entries:
         key = (e.principal, e.resource_type, e.resource_id)
         if e.action not in grouped[key]:
             grouped[key].append(e.action)
+        # 项目级条目的归属优先于平台级（NULL），用于后续按项目展开角色绑定
+        if e.project_id or key not in entry_projects:
+            entry_projects[key] = e.project_id
+
+    from services.cerbos_policy_parser import get_role_actions_map
 
     output: list[EffectivePermission] = []
     for (p, rt, rid), actions in grouped.items():
-        # 查询角色绑定补充
-        role_stmt = select(RoleBinding).where(
+        # 角色绑定的展开限定在该条目所属项目内，避免混入其他项目的绑定与动作
+        entry_project = entry_projects.get((p, rt, rid))
+
+        role_conditions = [
             RoleBinding.principal == p,
             RoleBinding.revoked == False,  # noqa: E712
-        )
-        role_result = await db.execute(role_stmt)
+        ]
+        if entry_project:
+            # 平台级绑定（project_id IS NULL）对所有项目生效，一并计入
+            role_conditions.append(
+                or_(
+                    RoleBinding.project_id == entry_project,
+                    RoleBinding.project_id.is_(None),
+                )
+            )
+        else:
+            role_conditions.append(RoleBinding.project_id.is_(None))
+
+        role_result = await db.execute(select(RoleBinding).where(*role_conditions))
         role_bindings = role_result.scalars().all()
+
+        # 角色→动作映射同样按该项目作用域解析
+        role_actions_map = get_role_actions_map(entry_project)
 
         source = "acl"
         for rb in role_bindings:
             source = "combined" if source == "acl" else source
-            from services.cerbos_policy_parser import get_role_actions_map as _gram
-            implicit = _gram().get(rb.role, [])
-            for a in implicit:
+            for a in role_actions_map.get(rb.role, []):
                 if a not in actions:
                     actions.append(a)
 
@@ -421,15 +606,17 @@ async def batch_grant_acl(
 
     for grant in body.grants:
         try:
-            # 验证项目访问权限
-            pid = getattr(grant, 'project_id', '') or ''
-            if not scope.can_access(pid):
-                results.append({"principal": grant.principal, "action": grant.action, "status": "failed", "reason": f"No access to project '{pid}'"})
-                failed += 1
-                continue
+            # 与单条 grant 走同一套层级 + 项目范围校验，避免批量端点成为绕行入口
+            pid = await _validate_grant_scope(
+                db, scope, grant.resource_type, grant.action,
+                getattr(grant, "project_id", None) or None,
+            )
 
-            # 检查重复
+            # 检查重复（唯一性按项目隔离）
             stmt = select(ACLEntry).where(
+                ACLEntry.project_id.is_(None)
+                if pid is None
+                else ACLEntry.project_id == pid,
                 ACLEntry.principal == grant.principal,
                 ACLEntry.resource_type == grant.resource_type,
                 ACLEntry.resource_id == grant.resource_id,
@@ -447,7 +634,7 @@ async def batch_grant_acl(
             new_id = uuid.uuid4()
             entry = ACLEntry(
                 id=new_id,
-                project_id=pid,
+                project_id=pid,  # _validate_grant_scope 归一后的值（平台层为 None）
                 tenant_id=grant.tenant_id,
                 principal=grant.principal,
                 resource_type=grant.resource_type,
@@ -459,11 +646,16 @@ async def batch_grant_acl(
             db.add(entry)
             results.append({"principal": grant.principal, "action": grant.action, "status": "granted"})
             success += 1
+        except HTTPException as e:
+            # 校验类失败（层级不符 / 无项目权限 / 动作未声明）逐条报出原因
+            detail = e.detail if isinstance(e.detail, str) else str(e.detail)
+            results.append({"principal": grant.principal, "action": grant.action, "status": "failed", "reason": detail[:200]})
+            failed += 1
         except Exception as e:
             results.append({"principal": grant.principal, "action": grant.action, "status": "failed", "reason": str(e)[:100]})
             failed += 1
 
-    # ★ Outbox 模式：同一事务内写 ACL + permission_changes
+    # Outbox 模式：同一事务内写 ACL + permission_changes
     publisher = get_event_publisher()
     version = 0
     change_id = None
@@ -473,6 +665,7 @@ async def batch_grant_acl(
             tenant_id=body.grants[0].tenant_id,
             resource_type=body.grants[0].resource_type,
             resource_id=body.grants[0].resource_id,
+            project_id=body.grants[0].project_id,
             event_type="ACL_BATCH_GRANTED",
             change_detail={"count": success, "failed": failed},
         )
@@ -491,7 +684,7 @@ async def batch_grant_acl(
 
 
 # ══════════════════════════════════════════════════════════════
-# P2-2: CSV 批量导入 ACL
+# CSV 批量导入 ACL
 # ══════════════════════════════════════════════════════════════
 
 
@@ -528,8 +721,6 @@ async def import_acl_csv(
     - 单行失败不影响其余
     - 返回详细错误报告
 
-    设计依据：docs/外部系统设计.md §3.3 /permissions 页面 — 批量操作
-              + docs/权限管理系统架构设计.md §2.1 动词目录。
     """
     # 验证项目访问权限
     if not scope.can_access(project_id):
@@ -652,6 +843,7 @@ async def import_acl_csv(
             tenant_id=admin.tenant_id or "tenant-dev",
             resource_type="acl",
             resource_id="csv-import",
+            project_id=project_id,
             event_type="ACL_BATCH_GRANTED",
             change_detail={"import_success": success, "import_skipped": skipped, "import_failed": failed},
         )

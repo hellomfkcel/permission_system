@@ -1,7 +1,4 @@
-"""租户与用户-租户绑定 — 租户管理权威源。
-
-设计依据：docs/tenant_design.md §3.1.1 tenants 表 + §3.1.2 tenant_memberships 表。
-"""
+"""租户与用户-租户绑定 — 租户管理权威源。"""
 
 import uuid
 from datetime import datetime
@@ -15,7 +12,6 @@ from app.database import Base
 
 class Tenant(Base):
     """租户定义表 — 整个多租户系统的租户权威源。"""
-
     __tablename__ = "tenants"
 
     id: Mapped[str] = mapped_column(
@@ -52,7 +48,6 @@ class Tenant(Base):
 
 class TenantMembership(Base):
     """用户-租户绑定表 — 记录用户在各租户中的成员身份与角色。"""
-
     __tablename__ = "tenant_memberships"
 
     id: Mapped[uuid.UUID] = mapped_column(

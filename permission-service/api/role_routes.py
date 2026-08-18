@@ -1,7 +1,4 @@
-"""管理台 API — 角色绑定管理。
-
-设计依据：docs/外部系统设计.md §2.4.4 管理台专用 API。
-"""
+"""管理台 API — 角色绑定管理。"""
 
 import uuid
 
@@ -13,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from models.role_binding import RoleBinding
 from services.event_publisher import get_event_publisher
-from api.auth_routes import get_current_admin, get_project_scope, ProjectScope, require_platform_permission
+from api.auth_routes import assert_project_scope, get_current_admin, get_project_scope, ProjectScope, require_platform_permission
 from schemas.responses import Principal
 
 router = APIRouter(prefix="/api/v1/roles", tags=["admin-roles"])
@@ -103,7 +100,7 @@ async def bind_role(
     )
     db.add(binding)
 
-    # ★ Outbox 模式（设计依据 §3.2）：
+    # Outbox 模式：
     # 在同一事务内写角色绑定 + permission_changes，原子提交
     publisher = get_event_publisher()
     version, change_id = await publisher.write_change_log(
@@ -111,6 +108,7 @@ async def bind_role(
         tenant_id=body.tenant_id,
         resource_type=body.resource_type or "kb",
         resource_id=body.resource_id or "",
+        project_id=body.project_id,
         event_type="ROLE_BOUND",
         change_detail={
             "action": "role_bound",
@@ -177,7 +175,7 @@ async def unbind_role(
 
     binding.revoked = True
 
-    # ★ Outbox 模式（设计依据 §3.2）：
+    # Outbox 模式：
     # 在同一事务内写角色解绑 + permission_changes，原子提交
     publisher = get_event_publisher()
     version, change_id = await publisher.write_change_log(
@@ -185,6 +183,7 @@ async def unbind_role(
         tenant_id=binding.tenant_id,
         resource_type=binding.resource_type or "kb",
         resource_id=binding.resource_id or "",
+        project_id=binding.project_id,
         event_type="ROLE_UNBOUND",
         change_detail={
             "action": "role_unbound",
@@ -232,6 +231,7 @@ async def list_bindings(
     # 项目范围过滤 — 平台级条目（project_id=NULL）始终对所有管理员可见
     from sqlalchemy import or_
     if project_id:
+        assert_project_scope(scope, project_id)
         conditions.append(
             or_(RoleBinding.project_id == project_id, RoleBinding.project_id.is_(None))
         )

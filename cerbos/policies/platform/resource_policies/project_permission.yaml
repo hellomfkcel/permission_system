@@ -1,0 +1,87 @@
+# Layer 2 · 项目权限数据层 — 项目内权限数据的操作控制
+#
+# 位置：cerbos/policies/platform/ 全局唯一，所有项目共用一份。
+#       新增项目无需新增此文件：项目边界由 resource.attr.project_id 表达，
+#       而非文件名或角色名。
+#
+# 约定：
+#   - granted_actions 的键统一为 project_id，而非 resource.id：以 resource.id
+#     为键时粒度与项目级授权记录不对称，无法用一条授权覆盖整个项目的权限数据
+#   - 不 importDerivedRoles，不引用任何项目专属角色名
+#   - 不写显式 DENY 规则
+#
+# resource.id = 权限数据类别：
+#   member_list        项目成员列表
+#   role_assignment    成员角色分配记录
+#   permission_matrix  项目权限矩阵
+#   role_definition    项目内角色定义
+#   grant_record       授权记录（granted_actions / resource_acl）
+#
+# resource.attr.project_id = 该权限数据所属项目，项目隔离由它保证。
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: "default"
+  resource: "project_permission"
+
+  rules:
+    # 平台超管兜底：任何项目的权限数据均可读写
+    - name: "platform_admin_override"
+      actions: ["permission:read", "permission:write"]
+      effect: EFFECT_ALLOW
+      roles: ["system_admin", "platform_admin"]
+
+    # 项目管理员：granted_actions[project_id] 含 manage
+    - name: "project_manager_full"
+      actions: ["permission:read", "permission:write"]
+      effect: EFFECT_ALLOW
+      roles: ["user"]
+      condition:
+        match:
+          all:
+            of:
+              - expr: request.resource.attr.retired == false
+              - expr: >
+                  has(request.principal.attr.granted_actions) &&
+                  request.resource.attr.project_id in
+                    request.principal.attr.granted_actions &&
+                  request.principal.attr.granted_actions[
+                    request.resource.attr.project_id
+                  ].exists(x, x == "manage")
+
+    # 委托只读：granted_actions[project_id] 含 permission:read
+    - name: "delegated_read"
+      actions: ["permission:read"]
+      effect: EFFECT_ALLOW
+      roles: ["user"]
+      condition:
+        match:
+          all:
+            of:
+              - expr: request.resource.attr.retired == false
+              - expr: >
+                  has(request.principal.attr.granted_actions) &&
+                  request.resource.attr.project_id in
+                    request.principal.attr.granted_actions &&
+                  request.principal.attr.granted_actions[
+                    request.resource.attr.project_id
+                  ].exists(x, x == "permission:read" || x == "permission:write")
+
+    # 委托读写：granted_actions[project_id] 含 permission:write
+    - name: "delegated_write"
+      actions: ["permission:write"]
+      effect: EFFECT_ALLOW
+      roles: ["user"]
+      condition:
+        match:
+          all:
+            of:
+              - expr: request.resource.attr.retired == false
+              - expr: >
+                  has(request.principal.attr.granted_actions) &&
+                  request.resource.attr.project_id in
+                    request.principal.attr.granted_actions &&
+                  request.principal.attr.granted_actions[
+                    request.resource.attr.project_id
+                  ].exists(x, x == "permission:write")
+
+    # 其他：Cerbos 隐式拒绝。

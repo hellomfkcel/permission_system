@@ -1,7 +1,4 @@
-"""Prometheus 兼容指标收集器 — 线程安全的 in-memory 计数器。
-
-设计依据：docs/RAG系统设计v14.md §8.3 Metric 关键指标。
-"""
+"""Prometheus 兼容指标收集器 — 线程安全的 in-memory 计数器。"""
 
 import threading
 import time
@@ -73,7 +70,7 @@ def record_event_publish_failed() -> None:
     inc_counter("visibility_events_publish_failed_total")
 
 
-# ── Keycloak 同步指标（P2-3）──
+# Keycloak 同步指标
 
 
 def record_keycloak_sync_success(
@@ -106,7 +103,6 @@ def record_keycloak_sync_failed() -> None:
 
 def get_prometheus_metrics() -> str:
     """生成 Prometheus text format 指标输出。"""
-
     lines: list[str] = []
 
     # Uptime
