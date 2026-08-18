@@ -6,7 +6,7 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import api from "@/lib/api";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -42,7 +42,7 @@ export default function UsersGroupsPage() {
   const [syncResult, setSyncResult] = useState("");
   const [activeTab, setActiveTab] = useState<"users" | "groups">("users");
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setLoading(true);
     try {
       const params: Record<string, string> = {};
@@ -60,11 +60,11 @@ export default function UsersGroupsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [isPlatformMode, currentProjectId]);
 
   useEffect(() => {
     loadData();
-  }, [currentProjectId]);
+  }, [loadData]);
 
   const handleSync = async () => {
     setSyncing(true);

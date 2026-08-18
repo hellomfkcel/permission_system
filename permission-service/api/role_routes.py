@@ -22,7 +22,7 @@ router = APIRouter(prefix="/api/v1/roles", tags=["admin-roles"])
 class BindRoleRequest(BaseModel):
     tenant_id: str
     principal: str = Field(..., description="user:xxx | group:xxx")
-    role: str = Field(..., description="kb_reader | kb_writer | kb_admin | admin")
+    role: str = Field(..., description="角色名（所属项目内的派生角色或身份角色）")
     resource_type: str | None = Field(None)
     resource_id: str | None = Field(None)
     granted_by: str

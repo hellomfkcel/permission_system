@@ -358,9 +358,10 @@ async def filter_items(
     except Exception as e:
         raise HTTPException(status_code=401, detail="Invalid credential") from e
 
+    project_id = _project_of(request)
+
     # 1.5 型二封禁检查 — 对每条 item 检查是否有资源限制
     # 被型二封禁的项直接加入 denied，不发送到 Cerbos 判定
-        project_id = _project_of(request)
     pre_denied_ids: set[str] = set()
     for item in body.items:
         restricted_principals = await check_resource_restriction(

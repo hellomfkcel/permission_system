@@ -31,7 +31,7 @@ class RoleDefinition(Base):
     )
     name: Mapped[str] = mapped_column(
         String(64), nullable=False,
-        comment="角色名: kb_reader, kb_writer, kb_admin, admin 等。"
+        comment="角色名（项目内派生角色或身份角色）。"
                 "项目级角色在项目内唯一，平台级角色（project_id IS NULL）全平台唯一。"
     )
     description: Mapped[str] = mapped_column(

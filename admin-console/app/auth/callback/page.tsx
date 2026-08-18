@@ -5,7 +5,7 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuthStore } from "@/stores/useAuthStore";
 
@@ -24,24 +24,7 @@ export default function AuthCallbackPage() {
   const [error, setError] = useState("");
   const [status, setStatus] = useState("正在验证身份...");
 
-  useEffect(() => {
-    const code = searchParams.get("code");
-    const errorParam = searchParams.get("error");
-
-    if (errorParam) {
-      setError(`Keycloak 认证失败: ${errorParam}`);
-      return;
-    }
-
-    if (!code) {
-      setError("未收到授权码，请重新登录");
-      return;
-    }
-
-    exchangeCode(code);
-  }, [searchParams]);
-
-  const exchangeCode = async (code: string) => {
+  const exchangeCode = useCallback(async (code: string) => {
     try {
       setStatus("正在交换授权码...");
 
@@ -96,7 +79,24 @@ export default function AuthCallbackPage() {
       const msg = err instanceof Error ? err.message : "未知错误";
       setError(`Token 交换失败: ${msg}`);
     }
-  };
+  }, [router, setAuth]);
+
+  useEffect(() => {
+    const code = searchParams.get("code");
+    const errorParam = searchParams.get("error");
+
+    if (errorParam) {
+      setError(`Keycloak 认证失败: ${errorParam}`);
+      return;
+    }
+
+    if (!code) {
+      setError("未收到授权码，请重新登录");
+      return;
+    }
+
+    exchangeCode(code);
+  }, [searchParams, exchangeCode]);
 
   if (error) {
     return (

@@ -26,13 +26,8 @@ interface PrincipalOption {
   type: "user" | "group" | "role";
 }
 
-// ── 资源类型标签（从后台 /auth/config 动态获取，此处仅作 SSR 兜底）──
-const RESOURCE_TYPE_LABELS_FALLBACK: Record<string, string> = {
-  kb: "📚 知识库",
-  document: "📄 文档",
-  platform: "🔧 平台功能",
-  project_permission: "🗂 项目权限数据",
-};
+// 资源类型标签全部来自后台 /auth/config 的 resource_type_labels（数据驱动），
+// 不在此处硬编码任何项目类型名（kb/document 等）。未知类型回退为原始类型名。
 
 /** 平台层资源类型，其授权是平台级的（不带 project_id）。
  *
@@ -401,7 +396,7 @@ export default function PermissionGrantDialog({
                     resourceType === rt ? "bg-green-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
                   }`}
                 >
-                  {resourceTypeLabels[rt] || RESOURCE_TYPE_LABELS_FALLBACK[rt] || rt}
+                  {resourceTypeLabels[rt] || rt}
                 </button>
               ))}
             </div>
@@ -409,7 +404,7 @@ export default function PermissionGrantDialog({
               type="text"
               value={resourceSearch}
               onChange={e => setResourceSearch(e.target.value)}
-              placeholder={`搜索${resourceTypeLabels[resourceType] || RESOURCE_TYPE_LABELS_FALLBACK[resourceType] || resourceType}...`}
+              placeholder={`搜索${resourceTypeLabels[resourceType] || resourceType}...`}
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500"
               disabled={loadingResources}
             />

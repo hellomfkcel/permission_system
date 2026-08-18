@@ -126,7 +126,7 @@ export default function RolesPage() {
     } finally {
       setLoading(false);
     }
-  }, [currentProjectId]);
+  }, [isPlatformMode, currentProjectId]);
 
   useEffect(() => { loadData(); }, [loadData]);
 

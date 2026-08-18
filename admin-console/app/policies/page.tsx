@@ -3,7 +3,7 @@
 
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import api from "@/lib/api";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useToast } from "@/components/shared/Toast";
@@ -76,7 +76,7 @@ export default function PoliciesPage() {
   } | null>(null);
 
   // ── 加载策略列表 ──
-  const loadPolicies = async () => {
+  const loadPolicies = useCallback(async () => {
     setLoading(true);
     try {
       const params: Record<string, string> = {};
@@ -92,11 +92,11 @@ export default function PoliciesPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [isPlatformMode, currentProjectId]);
 
   useEffect(() => {
     loadPolicies();
-  }, [currentProjectId]);
+  }, [loadPolicies]);
 
   // ── 查看策略 YAML ──
   const viewPolicy = (policy: PolicyEntry) => {
@@ -473,7 +473,7 @@ export default function PoliciesPage() {
                 )}
               </div>
             ) : (
-              <p className="text-xs text-gray-400">点击"刷新"检查 Cerbos PDP 策略部署状态</p>
+              <p className="text-xs text-gray-400">点击&quot;刷新&quot;检查 Cerbos PDP 策略部署状态</p>
             )}
           </div>
         </div>

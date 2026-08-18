@@ -7,9 +7,10 @@ Phase 1: 替代硬编码注册表。系统管理员可在此页面管理所有�
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import api from "@/lib/api";
 import { useToast } from "@/components/shared/Toast";
+import { apiErrorMessage } from "@/lib/apiError";
 
 interface Project {
   id: string; name: string; description: string; status: string;
@@ -58,14 +59,14 @@ export default function ProjectsPage() {
   // API Key creation result
   const [newApiKey, setNewApiKey] = useState<string | null>(null);
 
-  const loadProjects = async () => {
+  const loadProjects = useCallback(async () => {
     setLoading(true);
     try {
       const { data } = await api.get("/api/v1/projects");
       setProjects(data);
     } catch { toast("error", "加载项目列表失败"); }
     finally { setLoading(false); }
-  };
+  }, [toast]);
 
   const loadDetail = async (projectId: string) => {
     setDetailLoading(true);
@@ -107,7 +108,7 @@ export default function ProjectsPage() {
       toast("success", `项目 ${newId} 创建成功`);
       setShowCreate(false); setNewId(""); setNewName(""); setNewDesc(""); setNewClients(""); setNewAudiences("");
       loadProjects();
-    } catch (e: any) { toast("error", e?.response?.data?.detail || "创建失败"); }
+    } catch (e) { toast("error", apiErrorMessage(e, "创建失败")); }
   };
 
   const handleAddClient = async () => {
@@ -117,7 +118,7 @@ export default function ProjectsPage() {
       toast("success", `Client ${newClientId} 已注册`);
       setShowAddClient(false); setNewClientId("");
       loadDetail(selected.id); loadProjects();
-    } catch (e: any) { toast("error", e?.response?.data?.detail || "添加失败"); }
+    } catch (e) { toast("error", apiErrorMessage(e, "添加失败")); }
   };
 
   const handleRemoveClient = async (clientId: string) => {
@@ -126,7 +127,7 @@ export default function ProjectsPage() {
       await api.delete(`/api/v1/projects/${selected.id}/clients/${clientId}`);
       toast("success", `Client ${clientId} 已移除`);
       loadDetail(selected.id); loadProjects();
-    } catch (e: any) { toast("error", e?.response?.data?.detail || "删除失败"); }
+    } catch (e) { toast("error", apiErrorMessage(e, "删除失败")); }
   };
 
   const handleCreateApiKey = async () => {
@@ -136,7 +137,7 @@ export default function ProjectsPage() {
       setNewApiKey(data.api_key);
       toast("success", "API Key 已创建 — 请立即保存");
       loadDetail(selected.id); loadProjects();
-    } catch (e: any) { toast("error", e?.response?.data?.detail || "创建失败"); }
+    } catch (e) { toast("error", apiErrorMessage(e, "创建失败")); }
   };
 
   const handleRevokeApiKey = async (keyId: string) => {
@@ -145,7 +146,7 @@ export default function ProjectsPage() {
       await api.post(`/api/v1/projects/${selected.id}/api-keys/${keyId}/revoke`);
       toast("success", "API Key 已吊销");
       loadDetail(selected.id); loadProjects();
-    } catch (e: any) { toast("error", e?.response?.data?.detail || "吊销失败"); }
+    } catch (e) { toast("error", apiErrorMessage(e, "吊销失败")); }
   };
 
   const handleAddAudience = async () => {
@@ -155,7 +156,7 @@ export default function ProjectsPage() {
       toast("success", `Audience ${newAudience} 已注册`);
       setShowAddAudience(false); setNewAudience("");
       loadDetail(selected.id); loadProjects();
-    } catch (e: any) { toast("error", e?.response?.data?.detail || "添加失败"); }
+    } catch (e) { toast("error", apiErrorMessage(e, "添加失败")); }
   };
 
   const handleRemoveAudience = async (audience: string) => {
@@ -164,7 +165,7 @@ export default function ProjectsPage() {
       await api.delete(`/api/v1/projects/${selected.id}/audiences/${audience}`);
       toast("success", `Audience ${audience} 已移除`);
       loadDetail(selected.id); loadProjects();
-    } catch (e: any) { toast("error", e?.response?.data?.detail || "删除失败"); }
+    } catch (e) { toast("error", apiErrorMessage(e, "删除失败")); }
   };
 
   const downloadSdkConfig = () => {
@@ -203,7 +204,7 @@ export default function ProjectsPage() {
   const loadAvailableUsers = async () => {
     try {
       const { data } = await api.get("/api/v1/auth/users");
-      setAvailableUsers(data.filter((u: any) => u.user_id));
+      setAvailableUsers(data.filter((u: { user_id?: string }) => !!u.user_id));
     } catch { setAvailableUsers([]); }
   };
 
@@ -221,7 +222,7 @@ export default function ProjectsPage() {
       toast("success", `成员 ${newMemberId} 已添加`);
       setShowAddMember(false); setNewMemberId(""); setNewMemberRole("project_admin");
       loadDetail(selected.id);
-    } catch (e: any) { toast("error", e?.response?.data?.detail || "添加失败"); }
+    } catch (e) { toast("error", apiErrorMessage(e, "添加失败")); }
   };
 
   const handleRemoveMember = async (userId: string) => {
@@ -230,10 +231,10 @@ export default function ProjectsPage() {
       await api.delete(`/api/v1/projects/${selected.id}/members/${encodeURIComponent(userId)}`);
       toast("success", `成员 ${userId} 已移除`);
       loadDetail(selected.id);
-    } catch (e: any) { toast("error", e?.response?.data?.detail || "移除失败"); }
+    } catch (e) { toast("error", apiErrorMessage(e, "移除失败")); }
   };
 
-  useEffect(() => { loadProjects(); }, []);
+  useEffect(() => { loadProjects(); }, [loadProjects]);
 
   return (
     <div>
@@ -314,20 +315,20 @@ export default function ProjectsPage() {
                     <span className="text-gray-500"># curl</span>
                   </div>
                   <div>curl -X POST {api.defaults.baseURL || "http://localhost:18080"}<span className="text-yellow-300">/v1/check</span> \</div>
-                  <div>  -H <span className="text-green-300">"Content-Type: application/json"</span> \</div>
-                  <div>  -H <span className="text-green-300">"X-Client-Id: {clients[0]?.client_id || 'your-client-id'}"</span> \</div>
-                  <div>  -H <span className="text-green-300">"X-Api-Key: (your-api-key)"</span> \</div>
-                  <div>  -d <span className="text-orange-300">'{`{"request_id":"t","credential":"<JWT>","action":"...","resource":{"type":"...","id":"..."}}`}'</span></div>
+                  <div>  -H <span className="text-green-300">{'"Content-Type: application/json"'}</span> \</div>
+                  <div>  -H <span className="text-green-300">{`"X-Client-Id: ${clients[0]?.client_id || 'your-client-id'}"`}</span> \</div>
+                  <div>  -H <span className="text-green-300">{'"X-Api-Key: (your-api-key)"'}</span> \</div>
+                  <div>  -d <span className="text-orange-300">{`'{"request_id":"t","credential":"<JWT>","action":"...","resource":{"type":"...","id":"..."}}'`}</span></div>
                   <div className="mt-2 pt-2 border-t border-gray-700">
                     <span className="text-gray-500"># Python</span>
                   </div>
                   <div><span className="text-purple-400">from</span> perm_service_client <span className="text-purple-400">import</span> PermissionClient</div>
                   <div>client = PermissionClient(</div>
-                  <div>  base_url=<span className="text-green-300">"{api.defaults.baseURL || 'http://localhost:18080'}"</span>,</div>
-                  <div>  api_key=<span className="text-green-300">"(your-api-key)"</span>,</div>
-                  <div>  client_id=<span className="text-green-300">"{clients[0]?.client_id || 'your-client-id'}"</span>,</div>
+                  <div>  base_url=<span className="text-green-300">{`"${api.defaults.baseURL || 'http://localhost:18080'}"`}</span>,</div>
+                  <div>  api_key=<span className="text-green-300">{'"(your-api-key)"'}</span>,</div>
+                  <div>  client_id=<span className="text-green-300">{`"${clients[0]?.client_id || 'your-client-id'}"`}</span>,</div>
                   <div>)</div>
-                  <div>result = client.check(<span className="text-green-300">"your-action"</span>, <span className="text-green-300">"your-type"</span>, <span className="text-green-300">"your-id"</span>)</div>
+                  <div>result = client.check(<span className="text-green-300">{'"your-action"'}</span>, <span className="text-green-300">{'"your-type"'}</span>, <span className="text-green-300">{'"your-id"'}</span>)</div>
                 </div>
               </div>
 

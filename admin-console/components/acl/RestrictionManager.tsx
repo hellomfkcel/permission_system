@@ -72,14 +72,14 @@ export default function RestrictionManager() {
     setLoading(false);
   }, []);
 
-  // 加载可用资源类型
+  // 加载可用资源类型（挂载时初始化一次）
   useEffect(() => {
     api.get("/api/v1/resources").then(r => {
       const types = new Set((r.data as Array<{resource_type: string}>).map(x => x.resource_type));
       const typeList = Array.from(types).sort();
       setAvailableResTypes(typeList);
-      if (typeList.length > 0 && !resType) setResType(typeList[0]);
-    }).catch(() => setAvailableResTypes(["kb", "document"]));
+      if (typeList.length > 0) setResType(prev => prev || typeList[0]);
+    }).catch(() => setAvailableResTypes([]));
   }, []);
 
   const loadPrincipals = useCallback(async () => {
@@ -118,10 +118,13 @@ export default function RestrictionManager() {
     if (restrictionType === "resource_restriction" && (!resType.trim() || !resId.trim())) {
       return showToast("error", "请输入资源类型和资源 ID");
     }
+    if (!currentProjectId || currentProjectId === "__all__") {
+      return showToast("error", "请先在顶部选择具体项目（封禁必须归属某个项目）");
+    }
 
     setSubmitting(true);
     try {
-      const pid = currentProjectId && currentProjectId !== "__all__" ? currentProjectId : "rag-v14";
+      const pid = currentProjectId;
       await api.post("/api/v1/restrictions/add", {
         tenant_id: user?.tenant_id || "tenant-dev",
         restriction_type: restrictionType,

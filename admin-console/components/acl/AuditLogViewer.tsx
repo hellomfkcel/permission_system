@@ -47,7 +47,6 @@ const PAGE_SIZE = 50;
 
 export default function AuditLogViewer() {
   const { currentProjectId } = useAuthStore();
-  const isPlatformMode = !currentProjectId || currentProjectId === "__all__";
 
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -92,7 +91,7 @@ export default function AuditLogViewer() {
       .then(r => setEntries(r.data || []))
       .catch(err => setError(err?.response?.data?.detail || err?.message || "加载审计日志失败"))
       .finally(() => setLoading(false));
-  }, [filters.resource_type, filters.resource_id, filters.principal, filters.decision_id, filters.from_time, filters.to_time, currentProjectId]);
+  }, [filters.resource_type, filters.resource_id, filters.principal, filters.decision_id, filters.from_time, filters.to_time]);
 
   useEffect(() => { load(); }, [load]);
 

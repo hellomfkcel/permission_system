@@ -92,8 +92,9 @@ export default function RoleDetailPage() {
         resource_id: binding.resource_id || undefined,
       });
       loadData();
-    } catch (e: any) {
-      alert(e.response?.data?.detail || "解绑失败");
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } };
+      alert(err.response?.data?.detail || "解绑失败");
     } finally {
       setUnbinding(null);
     }

@@ -26,13 +26,13 @@ class RoleBinding(Base):
     )
     role: Mapped[str] = mapped_column(
         String(64), nullable=False,
-        comment="kb_reader | kb_writer | kb_admin | admin",
+        comment="角色名（项目内派生角色或身份角色）",
     )
     resource_type: Mapped[str | None] = mapped_column(
-        String(64), nullable=True, comment="可选：限定到特定资源类型的 KB"
+        String(64), nullable=True, comment="可选：限定到特定资源类型"
     )
     resource_id: Mapped[str | None] = mapped_column(
-        String(255), nullable=True, comment="可选：限定到特定 KB"
+        String(255), nullable=True, comment="可选：限定到特定资源实例"
     )
     granted_by: Mapped[str] = mapped_column(String(255), nullable=False)
     granted_at: Mapped[datetime] = mapped_column(

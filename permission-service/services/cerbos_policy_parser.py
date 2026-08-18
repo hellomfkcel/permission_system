@@ -455,7 +455,7 @@ def get_role_actions_map(project_id: str | None = None) -> dict[str, list[str]]:
         project_id: 指定时只合并该项目与全局命名空间；None 返回全部。
 
     Returns:
-        {role_name: [action, ...]}，如 {"kb_reader": ["doc:view", "kb:read"]}
+        {role_name: [action, ...]}，如 {"editor": ["read", "write"]}
     """
     index = get_policy_index()
     return {
@@ -500,13 +500,13 @@ def describe_role(name: str, project_id: str | None = None) -> dict:
 
     Returns:
         {
-            "name": "kb_reader",
+            "name": "editor",
             "kind": "derived" | "identity",
             "activated_by": ["user"],          # parentRoles，激活条件而非权限来源
             "activation": "identity" | "grant" | "acl",
-            "permissions": ["doc:view", ...],  # 该作用域内策略授予的动作
+            "permissions": ["read", ...],      # 该作用域内策略授予的动作
             "conditional_permissions": [...],  # 其中需运行时授权记录才生效的子集
-            "project_id": "rag-v14" | "platform" | "",
+            "project_id": "demo2" | "platform" | "",
         }
     """
     index = get_policy_index()
@@ -549,15 +549,15 @@ def parse_permissions_matrix(project_id: str | None = None) -> dict:
         {
             "roles": [
                 {
-                    "name": "kb_reader",
+                    "name": "editor",
                     "kind": "derived",
                     "activated_by": ["user"],
                     "activation": "grant",
-                    "permissions": ["doc:view", "doc:retrieve", "kb:read"],
+                    "permissions": ["read", "write"],
                     "conditional_permissions": [...],
                     "parent_keycloak_roles": ["user"],   # 兼容旧字段
                     "source": "cerbos",                  # 兼容旧字段
-                    "project_id": "rag-v14",
+                    "project_id": "demo2",
                 },
                 ...
             ]

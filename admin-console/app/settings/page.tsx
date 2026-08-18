@@ -43,11 +43,11 @@ export default function SettingsPage() {
       .then(() => setHealth((h) => ({ ...h, permService: "ok" })))
       .catch(() => setHealth((h) => ({ ...h, permService: "down" })));
 
-    // 检查 Cerbos PDP（通过 simulate 端点探测）
+    // 检查 Cerbos PDP（通过 simulate 端点探测，用平台通用动作，不绑定任何项目）
     api.post("/api/v1/simulate", {
       principal: { id: "user:health-check", roles: ["user"], attr: {} },
-      action: "kb:read",
-      resource: { kind: "kb", id: "health-check", attr: { retired: false } },
+      action: "platform:read",
+      resource: { kind: "platform", id: "health-check", attr: { retired: false } },
     })
       .then(() => setHealth((h) => ({ ...h, cerbos: "ok" })))
       .catch(() => setHealth((h) => ({ ...h, cerbos: "down" })));

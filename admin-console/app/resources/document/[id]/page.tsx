@@ -3,7 +3,7 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import api from "@/lib/api";
 import PermissionGrantDialog from "@/components/acl/PermissionGrantDialog";
@@ -27,15 +27,15 @@ export default function DocumentDetailPage() {
   const [loading, setLoading] = useState(true);
   const [grantOpen, setGrantOpen] = useState(false);
 
-  const loadACL = async () => {
+  const loadACL = useCallback(async () => {
     try {
       const res = await api.get("/api/v1/acl", { params: { resource_type: "document", resource_id: docId } });
       setAcl(res.data);
     } catch { setAcl([]); }
     setLoading(false);
-  };
+  }, [docId]);
 
-  useEffect(() => { loadACL(); }, [docId]);
+  useEffect(() => { loadACL(); }, [loadACL]);
 
   return (
     <div className="p-6 max-w-6xl mx-auto">

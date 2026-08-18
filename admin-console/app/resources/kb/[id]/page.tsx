@@ -5,7 +5,7 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import api from "@/lib/api";
 import PermissionGrantDialog from "@/components/acl/PermissionGrantDialog";
@@ -33,15 +33,15 @@ export default function KBDetailPage() {
   const [activeTab, setActiveTab] = useState<"acl" | "roles" | "restrictions" | "trace">("acl");
   const [grantOpen, setGrantOpen] = useState(false);
 
-  const loadACL = async () => {
+  const loadACL = useCallback(async () => {
     try {
       const res = await api.get("/api/v1/acl", { params: { resource_type: "kb", resource_id: kbId } });
       setAcl(res.data);
     } catch { setAcl([]); }
     setLoading(false);
-  };
+  }, [kbId]);
 
-  useEffect(() => { loadACL(); }, [kbId]);
+  useEffect(() => { loadACL(); }, [loadACL]);
 
   return (
     <div className="p-6 max-w-6xl mx-auto">

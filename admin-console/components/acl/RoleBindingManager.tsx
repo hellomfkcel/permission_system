@@ -72,7 +72,8 @@ export default function RoleBindingManager() {
       }
       setAvailableResourceTypes(Array.from(types).sort());
     } catch {
-      setAvailableResourceTypes(["kb", "document", "platform"]);
+      // 拉取失败不硬编码任何资源类型；由后续重试 / 用户输入补齐
+      setAvailableResourceTypes([]);
     }
   }, []);
 
@@ -151,9 +152,12 @@ export default function RoleBindingManager() {
   // ── 绑定角色 ──
   const handleBind = async () => {
     if (!bindPrincipal.trim()) return showToast("error", "请输入或选择主体");
+    if (!currentProjectId || currentProjectId === "__all__") {
+      return showToast("error", "请先在顶部选择具体项目（角色绑定必须归属某个项目）");
+    }
     setBindSubmitting(true);
     try {
-      const pid = currentProjectId && currentProjectId !== "__all__" ? currentProjectId : "rag-v14";
+      const pid = currentProjectId;
       await api.post("/api/v1/roles/bind", {
         tenant_id: user?.tenant_id || "tenant-dev",
         principal: bindPrincipal.trim(),

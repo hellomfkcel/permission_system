@@ -8,10 +8,10 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   FolderOpen, FileText, Users, Key, History, Ban,
-  AlertTriangle, Clock, Boxes, Shield, Globe,
+  AlertTriangle, Clock, Boxes, Shield,
 } from "lucide-react";
 import api from "@/lib/api";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -57,17 +57,22 @@ interface RecentChangesData {
 
 // ── 资源类型 → 图标/颜色映射（按 resource_type 动态匹配）──
 
-const RESOURCE_ICONS: Record<string, React.ReactNode> = {
-  kb: <FolderOpen size={32} />,
-  document: <FileText size={32} />,
-  platform: <Shield size={32} />,
+// 资源类型图标/颜色按类型名确定性分配（无项目特定映射，任何资源类型都有稳定呈现）
+const RESOURCE_ICON_PALETTE: React.ReactNode[] = [
+  <FolderOpen key="folder" size={32} />, <FileText key="file" size={32} />, <Shield key="shield" size={32} />,
+  <Boxes key="boxes" size={32} />, <Users key="users" size={32} />, <Key key="key" size={32} />,
+];
+const RESOURCE_COLOR_PALETTE: string[] = [
+  "text-blue-500", "text-purple-500", "text-emerald-500",
+  "text-amber-500", "text-rose-500", "text-cyan-500",
+];
+const typeHash = (s: string): number => {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
 };
-
-const RESOURCE_COLORS: Record<string, string> = {
-  kb: "text-blue-500",
-  document: "text-purple-500",
-  platform: "text-orange-500",
-};
+const resourceIcon = (t: string) => RESOURCE_ICON_PALETTE[typeHash(t) % RESOURCE_ICON_PALETTE.length];
+const resourceColor = (t: string) => RESOURCE_COLOR_PALETTE[typeHash(t) % RESOURCE_COLOR_PALETTE.length];
 
 const RESTRICTION_ICONS: Record<string, React.ReactNode> = {
   subject_ban: <Ban size={32} />,
@@ -150,7 +155,7 @@ export default function DashboardPage() {
   const isPlatformMode =
     !currentProjectId || currentProjectId === "__all__";
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
@@ -169,11 +174,11 @@ export default function DashboardPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [isPlatformMode, currentProjectId]);
 
   useEffect(() => {
     loadData();
-  }, [currentProjectId]);
+  }, [loadData]);
 
   return (
     <div>
@@ -259,9 +264,9 @@ export default function DashboardPage() {
                 key={rs.resource_type}
                 title={rs.label}
                 value={rs.count}
-                icon={RESOURCE_ICONS[rs.resource_type] ?? <Globe size={32} />}
+                icon={resourceIcon(rs.resource_type)}
                 description={`活跃 ${rs.label}`}
-                color={RESOURCE_COLORS[rs.resource_type] ?? "text-gray-500"}
+                color={resourceColor(rs.resource_type)}
               />
             ))}
 

@@ -11,10 +11,8 @@ import { useEffect, useState, useCallback } from "react";
 import api from "@/lib/api";
 import { useAuthStore } from "@/stores/useAuthStore";
 
-// ── 资源类型标签（从后台 /auth/config 动态获取，此处仅作 SSR 兜底）──
-const RESOURCE_TYPE_LABELS_FALLBACK: Record<string, string> = {
-  kb: "知识库", document: "文档", platform: "平台功能",
-};
+// 资源类型标签全部来自后台 /auth/config 的 resource_type_labels（数据驱动），
+// 不在此处硬编码任何项目类型名；未知类型回退为原始类型名。
 
 interface ScenarioPreset {
   name: string;
@@ -56,16 +54,14 @@ export default function PolicySimulator() {
   const [availableResourceTypes, setAvailableResourceTypes] = useState<string[]>([]);
   const [resourceTypeLabels, setResourceTypeLabels] = useState<Record<string, string>>({});
   const [scenarios, setScenarios] = useState<ScenarioPreset[]>([]);
-  const [sampleUsers, setSampleUsers] = useState<Array<{id: string; roles: string[]}>>([]);
 
   // ── 加载所有数据 ──
   //     resource_actions 和 resource_type_labels 均从 /auth/config 动态获取，无硬编码。
   const loadAllData = useCallback(async () => {
     try {
-      const [configRes, resourcesRes, rolesRes, usersRes] = await Promise.all([
+      const [configRes, resourcesRes, usersRes] = await Promise.all([
         api.get("/api/v1/auth/config"),
         api.get("/api/v1/resources"),
-        api.get("/api/v1/roles/definitions"),
         api.get("/api/v1/auth/users"),
       ]);
 
@@ -101,12 +97,9 @@ export default function PolicySimulator() {
       const typeList = Array.from(types).sort();
       setAvailableResourceTypes(typeList);
 
-      // 角色列表
-      const roleDefs = rolesRes.data as Array<{name: string; is_system: boolean}>;
-
-      // 用户列表（取前5个做样本）
-      const users = (usersRes.data as Array<{user_id: string; roles: string[]}>).slice(0, 5);
-      setSampleUsers(users.map(u => ({ id: u.user_id, roles: u.roles || [] })));
+      // 用户列表（取前5个做样本），统一为 {id, roles} 形状
+      const users = (usersRes.data as Array<{user_id: string; roles: string[]}>).slice(0, 5)
+        .map(u => ({ id: u.user_id, roles: u.roles || [] }));
 
       // ── 数据驱动生成场景 ──
       const generated: ScenarioPreset[] = [];
@@ -181,7 +174,7 @@ export default function PolicySimulator() {
       if (users.length > 0) {
         const u = users[0];
         setPrincipal(JSON.stringify({
-          id: `user:${u.user_id}`, roles: u.roles, attr: { tenant_id: "tenant-dev" },
+          id: `user:${u.id}`, roles: u.roles, attr: { tenant_id: "tenant-dev" },
         }, null, 2));
       }
       setResourceAttr(JSON.stringify({ retired: false }, null, 2));
@@ -191,7 +184,6 @@ export default function PolicySimulator() {
       setAvailableResourceTypes([]);
       setResourceTypeLabels({});
       setScenarios([]);
-      setSampleUsers([]);
     }
   }, [isPlatformMode]);
 
@@ -287,7 +279,7 @@ export default function PolicySimulator() {
               <label className="block text-sm font-medium text-gray-700 mb-1">资源类型</label>
               <select value={resourceKind} onChange={e => setResourceKind(e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
                 {availableResourceTypes.map(rt => (
-                  <option key={rt} value={rt}>{rt}（{resourceTypeLabels[rt] || RESOURCE_TYPE_LABELS_FALLBACK[rt] || rt}）</option>
+                  <option key={rt} value={rt}>{rt}（{resourceTypeLabels[rt] || rt}）</option>
                 ))}
               </select>
             </div>

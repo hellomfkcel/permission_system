@@ -3,19 +3,10 @@
 
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useCallback, useEffect, useState, useMemo } from "react";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useSearchParams } from "next/navigation";
-/** 通用动作标签（支持 kb/doc/platform，未知动作原样返回） */
-function actionLabel(a: string): string {
-  const m: Record<string, string> = {
-    "kb:read": "读取KB", "kb:write": "写入KB", "kb:manage": "管理KB", "kb:grant": "授权KB",
-    "doc:view": "查看文档", "doc:download": "下载文档", "doc:retrieve": "检索文档",
-    "doc:unmount": "移除文档", "doc:purge": "删除文档", "doc:share": "分享文档",
-    "platform:read": "平台读取", "platform:write": "平台写入",
-  };
-  return m[a] || a;
-}
+import { useActionLabels } from "@/lib/actionLabels";
 import api from "@/lib/api";
 import PermissionGrantDialog from "@/components/acl/PermissionGrantDialog";
 
@@ -88,6 +79,7 @@ interface ResourceDetail {
 export default function ResourcesPage() {
   const searchParams = useSearchParams();
   const { currentProjectId } = useAuthStore();
+  const { getLabel, typeLabels } = useActionLabels();
 
   // URL 参数支持：?resource_type=kb&resource_id=xxx 自动展开详情
   // 设计依据：docs/外部系统设计.md §3.4.3 RAG 系统跳转入口对接 —
@@ -111,7 +103,7 @@ export default function ResourcesPage() {
 
   // 权限授予 Dialog 状态
   const [showGrantDialog, setShowGrantDialog] = useState(false);
-  const [grantResourceType, setGrantResourceType] = useState("kb");
+  const [grantResourceType, setGrantResourceType] = useState("");
   const [grantResourceId, setGrantResourceId] = useState("");
 
   // 复制成功提示
@@ -130,7 +122,7 @@ export default function ResourcesPage() {
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  const loadResources = () => {
+  const loadResources = useCallback(() => {
     setLoading(true);
     setError("");
 
@@ -146,11 +138,11 @@ export default function ResourcesPage() {
         );
       })
       .finally(() => setLoading(false));
-  };
+  }, [filterType]);
 
   useEffect(() => {
     loadResources();
-  }, [filterType, currentProjectId]);
+  }, [loadResources, currentProjectId]);
 
   // URL 参数自动展开详情（resources 加载完成后触发一次）
   useEffect(() => {
@@ -214,14 +206,27 @@ export default function ResourcesPage() {
     );
   }, [resources, debouncedSearch]);
 
-  const typeLabel = (t: string) =>
-    ({ kb: "知识库", document: "文档", platform: "平台功能" } as Record<string, string>)[t] || t;
+  // 资源类型标签来自后端 /auth/config 的 resource_type_labels（数据驱动，不硬编码任何项目）
+  const typeLabel = (t: string) => typeLabels[t] || t;
 
-  const typeColor = (t: string) =>
-    ({ kb: "bg-blue-100 text-blue-800", document: "bg-purple-100 text-purple-800", platform: "bg-orange-100 text-orange-800" } as Record<string, string>)[t] || "bg-gray-100 text-gray-800";
-
-  const statColor = (t: string) =>
-    ({ kb: "text-blue-600", document: "text-purple-600", platform: "text-orange-600" } as Record<string, string>)[t] || "text-gray-600";
+  // 颜色按类型名确定性分配（无项目特定映射，任何资源类型都有稳定配色）
+  const TYPE_COLOR_PALETTE = [
+    "bg-blue-100 text-blue-800", "bg-purple-100 text-purple-800",
+    "bg-emerald-100 text-emerald-800", "bg-amber-100 text-amber-800",
+    "bg-rose-100 text-rose-800", "bg-cyan-100 text-cyan-800",
+  ];
+  const STAT_COLOR_PALETTE = [
+    "text-blue-600", "text-purple-600",
+    "text-emerald-600", "text-amber-600",
+    "text-rose-600", "text-cyan-600",
+  ];
+  const hashStr = (s: string): number => {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+    return Math.abs(h);
+  };
+  const typeColor = (t: string) => TYPE_COLOR_PALETTE[hashStr(t) % TYPE_COLOR_PALETTE.length];
+  const statColor = (t: string) => STAT_COLOR_PALETTE[hashStr(t) % STAT_COLOR_PALETTE.length];
 
   // ── 数据驱动统计：按 resource_type GROUP BY + 退役数 ──
   const stats = useMemo(() => {
@@ -501,7 +506,7 @@ export default function ResourcesPage() {
                             <span className={`px-1.5 py-0.5 rounded text-[10px] ${
                               acl.revoked ? "bg-gray-200 text-gray-500" : "bg-blue-200 text-blue-800"
                             }`}>
-                              {actionLabel(acl.action)}
+                              {getLabel(acl.action)}
                             </span>
                           </div>
                           <div className="text-gray-500 mt-0.5">

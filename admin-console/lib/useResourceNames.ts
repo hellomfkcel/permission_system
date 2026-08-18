@@ -38,18 +38,13 @@ async function fetchResourceMap(projectId: string | null): Promise<Map<string, s
   const promise = (async () => {
     const map = new Map<string, string>();
     try {
-      const params: Record<string, string> = { type: "kb" };
-      // 平台模式不传 project_id，项目模式传 project_id
+      // 拉取全部资源类型（不硬编码 kb/document）。项目模式由 API 拦截器注入 project_id。
+      const params: Record<string, string> = {};
       if (projectId && projectId !== "__all__") {
         params.project_id = projectId;
       }
-      const kbRes = await api.get<ResourceItem[]>("/api/v1/resources", { params });
-      const docParams: Record<string, string> = { type: "document" };
-      if (projectId && projectId !== "__all__") {
-        docParams.project_id = projectId;
-      }
-      const docRes = await api.get<ResourceItem[]>("/api/v1/resources", { params: docParams });
-      for (const r of [...(kbRes.data || []), ...(docRes.data || [])]) {
+      const res = await api.get<ResourceItem[]>("/api/v1/resources", { params });
+      for (const r of res.data || []) {
         if (r.name) {
           map.set(`${r.resource_type}:${r.resource_id}`, r.name);
         }
@@ -85,7 +80,7 @@ export function useResourceNames(projectId?: string | null) {
     return () => {
       mountedRef.current = false;
     };
-  }, [cacheKey]);
+  }, [cacheKey, projectId]);
 
   const getName = useCallback(
     (resourceType: string, resourceId: string): string | null => {

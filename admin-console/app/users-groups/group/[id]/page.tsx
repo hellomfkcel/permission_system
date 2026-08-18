@@ -7,15 +7,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import api from "@/lib/api";
 import PermissionTrace from "@/components/acl/PermissionTrace";
-function actionLabel(a: string): string {
-  const m: Record<string, string> = {
-    "kb:read": "读取KB", "kb:write": "写入KB", "kb:manage": "管理KB", "kb:grant": "授权KB",
-    "doc:view": "查看文档", "doc:download": "下载文档", "doc:retrieve": "检索文档",
-    "doc:unmount": "移除文档", "doc:purge": "删除文档", "doc:share": "分享文档",
-    "platform:read": "平台读取", "platform:write": "平台写入",
-  };
-  return m[a] || a;
-}
+import { useActionLabels } from "@/lib/actionLabels";
 
 interface ACLSummary {
   id: string;
@@ -40,6 +32,7 @@ export default function GroupDetailPage() {
   const params = useParams();
   const groupId = params.id as string;
   const principal = `group:${groupId}`;
+  const { getLabel } = useActionLabels();
 
   const [aclEntries, setAclEntries] = useState<ACLSummary[]>([]);
   const [roleBindings, setRoleBindings] = useState<RoleSummary[]>([]);
@@ -80,7 +73,7 @@ export default function GroupDetailPage() {
               {aclEntries.map((entry, i) => (
                 <div key={i} className="flex items-center justify-between p-2 bg-gray-50 rounded text-sm">
                   <span>{entry.resource_type}/{entry.resource_id}</span>
-                  <span className="text-blue-600 font-medium">{actionLabel(entry.action)}</span>
+                  <span className="text-blue-600 font-medium">{getLabel(entry.action)}</span>
                 </div>
               ))}
             </div>
