@@ -22,7 +22,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-perm_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-perm_pass}
     ports:
-      - "25433:5432"
+      - "${PERM_POSTGRES_HOST_PORT:-25433}:5432"
     volumes:
       - perm_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -42,7 +42,7 @@ services:
     container_name: perm-redis
     command: redis-server --requirepass ${PERM_REDIS_PASSWORD:-perm_redis_pwd_2026} --appendonly yes
     ports:
-      - "16380:6379"
+      - "${PERM_REDIS_HOST_PORT:-16380}:6379"
     volumes:
       - perm_redis_data:/data
     healthcheck:
@@ -73,7 +73,7 @@ services:
       - --http-port=8080
       - --health-enabled=true
     ports:
-      - "8080:8080"
+      - "${KEYCLOAK_HOST_PORT:-8080}:8080"
     volumes:
       - keycloak_data:/opt/keycloak/data
     networks:
@@ -93,7 +93,7 @@ services:
     build: ./permission-service
     container_name: permission-service
     ports:
-      - "18080:8080"
+      - "${PERMISSION_SERVICE_HOST_PORT:-18080}:8080"
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-perm_user}:${POSTGRES_PASSWORD:-perm_pass}@perm-postgres:5432/permission_db
       DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-perm_user}:${POSTGRES_PASSWORD:-perm_pass}@perm-postgres:5432/permission_db
@@ -199,17 +199,17 @@ services:
       args:
         # NEXT_PUBLIC_* 构建时内联进 JS 束，浏览器按此地址访问
         # 权限服务/Keycloak（EXTERNAL_HOST 须为浏览器可达 IP/域名，非 localhost）
-        NEXT_PUBLIC_PERMISSION_SERVICE_URL: http://${EXTERNAL_HOST:-localhost}:18080
-        NEXT_PUBLIC_KEYCLOAK_URL: http://${EXTERNAL_HOST:-localhost}:8080
+        NEXT_PUBLIC_PERMISSION_SERVICE_URL: http://${EXTERNAL_HOST:-localhost}:${PERMISSION_SERVICE_HOST_PORT:-18080}
+        NEXT_PUBLIC_KEYCLOAK_URL: http://${EXTERNAL_HOST:-localhost}:${KEYCLOAK_HOST_PORT:-8080}
         NEXT_PUBLIC_KEYCLOAK_REALM: rag-v14
         NEXT_PUBLIC_KEYCLOAK_CLIENT_ID: admin-console
     container_name: admin-console
     ports:
-      - "3002:3000"
+      - "${ADMIN_CONSOLE_HOST_PORT:-3002}:3000"
     environment:
       # 运行时也保留（与服务端渲染一致）；构建期内联由 build.args 负责
-      NEXT_PUBLIC_PERMISSION_SERVICE_URL: http://${EXTERNAL_HOST:-localhost}:18080
-      NEXT_PUBLIC_KEYCLOAK_URL: http://${EXTERNAL_HOST:-localhost}:8080
+      NEXT_PUBLIC_PERMISSION_SERVICE_URL: http://${EXTERNAL_HOST:-localhost}:${PERMISSION_SERVICE_HOST_PORT:-18080}
+      NEXT_PUBLIC_KEYCLOAK_URL: http://${EXTERNAL_HOST:-localhost}:${KEYCLOAK_HOST_PORT:-8080}
       NEXT_PUBLIC_KEYCLOAK_REALM: rag-v14
       NEXT_PUBLIC_KEYCLOAK_CLIENT_ID: admin-console
       # Next.js standalone server.js 默认用容器 hostname 绑定 → DNS 解析失败(EAI_AGAIN)；

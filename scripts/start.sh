@@ -117,26 +117,26 @@ cmd_start() {
     info "启动 permission-service..."
     $COMPOSE up -d $build_flag permission-service
     wait_healthy "$COMPOSE" "$INFRA_TIMEOUT" "permission-service"
-    wait_http "http://localhost:18080/healthz" "$APP_TIMEOUT" "permission-service(/healthz)"
+    wait_http "http://localhost:${PERMISSION_SERVICE_HOST_PORT:-18080}/healthz" "$APP_TIMEOUT" "permission-service(/healthz)"
 
     # 5. 管理台前端
     info "启动 admin-console..."
     $COMPOSE up -d $build_flag admin-console
-    wait_http "http://localhost:3002" "$APP_TIMEOUT" "admin-console(:3002)"
+    wait_http "http://localhost:${ADMIN_CONSOLE_HOST_PORT:-3002}" "$APP_TIMEOUT" "admin-console(:3002)"
 
     echo ""
     echo "══════ 外部权限系统已启动 ══════"
-    echo "  权限服务   http://localhost:18080   (/healthz)"
-    echo "  管理台     http://localhost:3002"
-    echo "  Keycloak   http://localhost:8080"
-    echo "  Cerbos     http://localhost:14592"
+    echo "  权限服务   http://localhost:${PERMISSION_SERVICE_HOST_PORT:-18080}   (/healthz)"
+    echo "  管理台     http://localhost:${ADMIN_CONSOLE_HOST_PORT:-3002}"
+    echo "  Keycloak   http://localhost:${KEYCLOAK_HOST_PORT:-8080}"
+    echo "  Cerbos     http://localhost:${CERBOS_HTTP_PORT:-14592}"
     echo "  日志       scripts/start.sh logs [-f] [服务名]"
     echo "  状态       scripts/start.sh status"
     echo ""
     echo "  RAG 联调核对（见 docs/ops/权限系统上线运维手册.md）:"
-    echo "    AUTHZ_SERVICE_URL = http://<rag-host>:18080"
+    echo "    AUTHZ_SERVICE_URL = http://<rag-host>:${PERMISSION_SERVICE_HOST_PORT:-18080}"
     echo "    SERVICE_API_KEY   = permission-service/config/service_api_key"
-    echo "    事件流 Redis      = perm-redis :16380 的 visibility_changed 频道"
+    echo "    事件流 Redis      = perm-redis :${PERM_REDIS_HOST_PORT:-16380} 的 visibility_changed 频道"
     echo "═══════════════════════════════"
 }
 
