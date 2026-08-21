@@ -105,14 +105,18 @@ services:
       cerbos:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/healthz || exit 1"]
+      # 镜像内无 curl，使用 Python 探测
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz', timeout=3)"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 15s
     restart: unless-stopped
     networks:
       - perm-network
+    # Linux 下访问宿主 Keycloak（KEYCLOAK_SERVER_URL=http://host.docker.internal:8080）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # ════════════════════════════════════════════════════════
   # Cerbos PDP — 策略决策点
@@ -161,6 +165,8 @@ services:
     restart: unless-stopped
     networks:
       - perm-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 # Secrets 默认从仓库内 permission-service/config/ 读取（该目录已在 .gitignore 中）。
 # 生产部署可通过 SECRETS_DIR 指向仓库外的挂载点，例如：

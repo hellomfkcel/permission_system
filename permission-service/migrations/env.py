@@ -1,3 +1,4 @@
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
@@ -8,6 +9,12 @@ from alembic import context
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+# 数据库连接：优先使用 DATABASE_URL_SYNC 环境变量（Docker 部署 / .env 覆盖），
+# 否则回退到 alembic.ini 中的 sqlalchemy.url。保证容器内迁移能连到 perm-postgres。
+_sync_url = os.getenv("DATABASE_URL_SYNC", "").strip()
+if _sync_url:
+    config.set_main_option("sqlalchemy.url", _sync_url)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
