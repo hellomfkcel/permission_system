@@ -578,63 +578,70 @@ async def _sync_policy_roles_to_db(project_id: str) -> dict[str, int]:
         logger.warning("policy_role_sync_parse_failed", project_id=project_id, error=str(e)[:200])
         return {"created": 0, "updated": 0, "deleted": 0}
 
-    # 项目应有派生角色名（供 stale 清理比对；无策略文件 → 空集合）
-    expected_names = {
+    # 项目应有的角色名（供 stale 清理比对）：解析器返回"派生 + 身份"全量角色，
+    # 仅取归属本项目（project_id == project_id）的——这保证了：
+    #   项目级角色（无论派生还是身份，如 rag-v14 的 legacy admin）一定来自本项目
+    #   自身策略文件解析；无策略文件的项目（如 demo2/demo3）解析集为空。
+    # 这比只比对派生角色安全——不会误删身份角色档案。
+    project_roles = {
         r.get("name") for r in (matrix.get("roles") or [])
-        if r.get("kind") == "derived" and r.get("name")
+        if r.get("project_id") == project_id and r.get("name")
     }
 
     async with async_session() as db:
-        if not expected_names:
-            # stale 清理：项目无策略文件/派生角色 → 删除该项目全部孤儿系统角色档案
-            # （如 demo2/demo3 等历史测试项目，策略已移除但档案残留）
-            # 注意：仅对"无策略文件"项目清理。有策略的项目不做 not_in 删除——
-            # role_definitions 无 kind 列，无法可靠区分身份角色（user/admin 等）
-            # 与派生角色，按名称比对会误删身份角色（如 rag-v14 的 legacy admin）。
-            result = await db.execute(
-                delete(RoleDefinition).where(
-                    RoleDefinition.project_id == project_id,
-                    RoleDefinition.is_system.is_(True),
-                )
+        for role_info in matrix["roles"]:
+            name = role_info.get("name", "")
+            if not name:
+                continue
+            # 仅同步 Cerbos 派生角色（跳过 user/system_admin 等身份角色，
+            # 它们的档案由 Keycloak / 平台种子数据维护）
+            if role_info.get("kind") != "derived":
+                continue
+
+            parent_roles = role_info.get("activated_by", [])
+            # 平台层命名空间（"platform"）与无归属（""）的角色不属于任何项目
+            parsed_project = role_info.get("project_id") or ""
+            role_project_id = (
+                None
+                if parsed_project in ("", PLATFORM_NAMESPACE)
+                else parsed_project
             )
-            deleted = result.rowcount
+
+            existing = await db.scalar(
+                select(RoleDefinition).where(RoleDefinition.name == name)
+            )
+
+            if existing:
+                existing.parent_keycloak_roles = parent_roles
+                existing.project_id = role_project_id
+                updated += 1
+            else:
+                new_role = RoleDefinition(
+                    name=name,
+                    description="Cerbos 派生角色（由策略文件自动建档）",
+                    parent_keycloak_roles=parent_roles,
+                    is_system=True,
+                    project_id=role_project_id,
+                )
+                db.add(new_role)
+                created += 1
+
+        # stale 清理（原则：项目级权限数据必须来自本项目自身策略文件）
+        # role_definitions 里归属本项目、但不在解析集（派生+身份）中的系统角色
+        # → 孤儿档案（历史同步残留），删除。无自身策略的项目解析集为空 → 全删。
+        if project_roles:
+            stmt = delete(RoleDefinition).where(
+                RoleDefinition.project_id == project_id,
+                RoleDefinition.is_system.is_(True),
+                RoleDefinition.name.not_in(project_roles),
+            )
         else:
-            for role_info in matrix["roles"]:
-                name = role_info.get("name", "")
-                if not name:
-                    continue
-                # 仅同步 Cerbos 派生角色（跳过 user/system_admin 等身份角色，
-                # 它们的档案由 Keycloak / 平台种子数据维护）
-                if role_info.get("kind") != "derived":
-                    continue
-
-                parent_roles = role_info.get("activated_by", [])
-                # 平台层命名空间（"platform"）与无归属（""）的角色不属于任何项目
-                parsed_project = role_info.get("project_id") or ""
-                role_project_id = (
-                    None
-                    if parsed_project in ("", PLATFORM_NAMESPACE)
-                    else parsed_project
-                )
-
-                existing = await db.scalar(
-                    select(RoleDefinition).where(RoleDefinition.name == name)
-                )
-
-                if existing:
-                    existing.parent_keycloak_roles = parent_roles
-                    existing.project_id = role_project_id
-                    updated += 1
-                else:
-                    new_role = RoleDefinition(
-                        name=name,
-                        description="Cerbos 派生角色（由策略文件自动建档）",
-                        parent_keycloak_roles=parent_roles,
-                        is_system=True,
-                        project_id=role_project_id,
-                    )
-                    db.add(new_role)
-                    created += 1
+            stmt = delete(RoleDefinition).where(
+                RoleDefinition.project_id == project_id,
+                RoleDefinition.is_system.is_(True),
+            )
+        result = await db.execute(stmt)
+        deleted = result.rowcount
 
         await db.commit()
 
