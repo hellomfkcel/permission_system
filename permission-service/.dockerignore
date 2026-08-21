@@ -1,0 +1,26 @@
+# ── 安全：敏感文件禁止进镜像（compose 通过 secrets/file 运行时注入）──
+config/
+
+# ── 本地/测试产物 ──
+.env
+.env.*
+tests/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.next/
+node_modules/
+*.log
+dist/
+build/
+
+# ── IDE / OS ──
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ── git ──
+.git/
+.gitignore
