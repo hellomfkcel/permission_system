@@ -562,7 +562,7 @@ async def _sync_policy_roles_to_db(project_id: str) -> dict[str, int]:
         {"created": N, "updated": N}
     """
     from app.database import async_session
-    from sqlalchemy import select
+    from sqlalchemy import delete, select
     from services.cerbos_policy_parser import (
         PLATFORM_NAMESPACE,
         parse_permissions_matrix as _parse_matrix,
@@ -570,58 +570,79 @@ async def _sync_policy_roles_to_db(project_id: str) -> dict[str, int]:
 
     created = 0
     updated = 0
+    deleted = 0
 
     try:
         matrix = _parse_matrix(project_id)
     except Exception as e:
         logger.warning("policy_role_sync_parse_failed", project_id=project_id, error=str(e)[:200])
-        return {"created": 0, "updated": 0}
+        return {"created": 0, "updated": 0, "deleted": 0}
 
-    if not matrix.get("roles"):
-        return {"created": 0, "updated": 0}
+    # 项目应有派生角色名（供 stale 清理比对；无策略文件 → 空集合）
+    expected_names = {
+        r.get("name") for r in (matrix.get("roles") or [])
+        if r.get("kind") == "derived" and r.get("name")
+    }
 
     async with async_session() as db:
-        for role_info in matrix["roles"]:
-            name = role_info.get("name", "")
-            if not name:
-                continue
-            # 仅同步 Cerbos 派生角色（跳过 user/system_admin 等身份角色，
-            # 它们的档案由 Keycloak / 平台种子数据维护）
-            if role_info.get("kind") != "derived":
-                continue
-
-            parent_roles = role_info.get("activated_by", [])
-            # 平台层命名空间（"platform"）与无归属（""）的角色不属于任何项目
-            parsed_project = role_info.get("project_id") or ""
-            role_project_id = (
-                None
-                if parsed_project in ("", PLATFORM_NAMESPACE)
-                else parsed_project
-            )
-
-            existing = await db.scalar(
-                select(RoleDefinition).where(RoleDefinition.name == name)
-            )
-
-            if existing:
-                existing.parent_keycloak_roles = parent_roles
-                existing.project_id = role_project_id
-                updated += 1
-            else:
-                new_role = RoleDefinition(
-                    name=name,
-                    description="Cerbos 派生角色（由策略文件自动建档）",
-                    parent_keycloak_roles=parent_roles,
-                    is_system=True,
-                    project_id=role_project_id,
+        if not expected_names:
+            # stale 清理：项目无策略文件/派生角色 → 删除该项目全部孤儿系统角色档案
+            # （如 demo2/demo3 等历史测试项目，策略已移除但档案残留）
+            # 注意：仅对"无策略文件"项目清理。有策略的项目不做 not_in 删除——
+            # role_definitions 无 kind 列，无法可靠区分身份角色（user/admin 等）
+            # 与派生角色，按名称比对会误删身份角色（如 rag-v14 的 legacy admin）。
+            result = await db.execute(
+                delete(RoleDefinition).where(
+                    RoleDefinition.project_id == project_id,
+                    RoleDefinition.is_system.is_(True),
                 )
-                db.add(new_role)
-                created += 1
+            )
+            deleted = result.rowcount
+        else:
+            for role_info in matrix["roles"]:
+                name = role_info.get("name", "")
+                if not name:
+                    continue
+                # 仅同步 Cerbos 派生角色（跳过 user/system_admin 等身份角色，
+                # 它们的档案由 Keycloak / 平台种子数据维护）
+                if role_info.get("kind") != "derived":
+                    continue
+
+                parent_roles = role_info.get("activated_by", [])
+                # 平台层命名空间（"platform"）与无归属（""）的角色不属于任何项目
+                parsed_project = role_info.get("project_id") or ""
+                role_project_id = (
+                    None
+                    if parsed_project in ("", PLATFORM_NAMESPACE)
+                    else parsed_project
+                )
+
+                existing = await db.scalar(
+                    select(RoleDefinition).where(RoleDefinition.name == name)
+                )
+
+                if existing:
+                    existing.parent_keycloak_roles = parent_roles
+                    existing.project_id = role_project_id
+                    updated += 1
+                else:
+                    new_role = RoleDefinition(
+                        name=name,
+                        description="Cerbos 派生角色（由策略文件自动建档）",
+                        parent_keycloak_roles=parent_roles,
+                        is_system=True,
+                        project_id=role_project_id,
+                    )
+                    db.add(new_role)
+                    created += 1
 
         await db.commit()
 
-    logger.info("policy_role_sync_complete", project_id=project_id, created=created, updated=updated)
-    return {"created": created, "updated": updated}
+    logger.info(
+        "policy_role_sync_complete",
+        project_id=project_id, created=created, updated=updated, deleted=deleted,
+    )
+    return {"created": created, "updated": updated, "deleted": deleted}
 
 
 def _validate_policy_path(policy_path: str) -> tuple[bool, str]:
@@ -1137,7 +1158,9 @@ class DeployStatusResult(BaseModel):
 @router.get("/policies/deploy-status", response_model=DeployStatusResult)
 async def get_deploy_status(
     principal: Principal = Depends(get_current_admin),
+    scope: ProjectScope = Depends(get_project_scope),
     _perm: None = Depends(require_platform_permission("policy_mgmt", "platform:read")),
+    project_id: str | None = Query(None, description="按项目统计策略数（可选，不传=全部可见）"),
 ) -> DeployStatusResult:
     """查询 Cerbos PDP 策略部署状态（P2-6 新增）。
 
@@ -1145,6 +1168,9 @@ async def get_deploy_status(
     1. 文件系统统计策略 YAML 文件数（与 PDP 加载的数据源一致）
     2. HTTP 探活 Cerbos PDP（GET / 返回 200 = PDP 运行中）
     3. 综合判定健康状态
+
+    项目隔离：传 project_id 时只统计该项目策略目录（policies/<project_id>/），
+    平台模式（不传）统计全部——与 /api/v1/policies 列表口径一致。
 
     Cerbos PDP HTTP API 不存在 /api/policies 端点（仅 gRPC Admin API 有此能力），
     因此改用文件计数 + HTTP 探活的混合校验方案。
@@ -1161,7 +1187,9 @@ async def get_deploy_status(
     # Cerbos 配置 storage.driver=disk + watchForChanges=true，
     # 策略文件即 PDP 加载的权威数据源。
     # 排除 .versions/ 目录（版本历史快照，非活跃策略）。
-    policy_root = _get_policy_root()
+    policy_root = _get_policy_root(project_id)
+    if project_id:
+        _assert_namespace_access(scope, project_id)
     try:
         yaml_files = list(policy_root.rglob("*.yaml")) + list(policy_root.rglob("*.yml"))
         # 去重 + 排除 .versions/ 目录
@@ -1194,12 +1222,15 @@ async def get_deploy_status(
             pdp_reachable = False
 
     # ── 3. 综合判定 ──
+    scope_label = f" in project {project_id}" if project_id else ""
     if pdp_reachable and policies_count > 0:
         status = "healthy"
-        message = f"{policies_count} policies loaded by Cerbos PDP"
+        message = f"{policies_count} policies loaded{scope_label} by Cerbos PDP"
     elif pdp_reachable and policies_count == 0:
         status = "degraded"
-        message = "Cerbos PDP is running but no policy files found — check cerbos/policies/ directory"
+        message = (
+            f"No policy files found{scope_label} — check cerbos/policies/{project_id or ''}/ directory"
+        )
     elif not pdp_reachable:
         status = "unknown"
         message = "Cannot reach Cerbos PDP — service may be starting or unreachable"

@@ -60,7 +60,10 @@ export default function PoliciesPage() {
   const checkDeployStatus = async () => {
     setCheckingDeploy(true);
     try {
-      const res = await api.get("/api/v1/policies/deploy-status");
+      // 项目隔离：非平台模式按当前项目统计策略数（后端按 project_id 过滤）
+      const params: Record<string, string> = {};
+      if (!isPlatformMode) params.project_id = currentProjectId;
+      const res = await api.get("/api/v1/policies/deploy-status", { params });
       setDeployStatus(res.data);
     } catch {
       setDeployStatus({status: "unknown", policies_count: 0, cerbos_version: "", message: "无法获取部署状态"});
