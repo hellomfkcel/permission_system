@@ -3,7 +3,7 @@
 # 外部权限系统 — 启动/运维脚本（Docker 部署形态）
 #
 # 用法（在仓库根目录执行，或任意目录执行本脚本的绝对路径）：
-#   scripts/start.sh start           # 按序启动：secrets → keycloak → 基础设施
+#   scripts/start.sh start           # 按序启动：secrets → 基础设施+Keycloak
 #                                    #            → alembic 迁移 → 权限服务 → 管理台
 #   scripts/start.sh stop            # 停止全部（保留数据卷）
 #   scripts/start.sh restart         # 重启全部
@@ -13,7 +13,7 @@
 #   scripts/start.sh init-secrets    # 校验/生成 secret 文件（幂等）
 #
 # 依赖：
-#   - Keycloak 部署（docker-compose.keycloak.yml 或既有 IdP），realm/client 已配置
+#   - Keycloak（本编排内 keycloak 服务或既有 IdP），realm/client 已配置
 #   - scripts/init_secrets.sh 可用的 openssl
 # ══════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -22,8 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Keycloak 已并入 docker-compose.yml，统一单一 compose 编排
 COMPOSE="docker compose -f docker-compose.yml"
-KEYCLOAK="docker compose -f docker-compose.keycloak.yml"
 
 INFRA_TIMEOUT="${INFRA_TIMEOUT:-180}"   # 基础设施健康等待上限（秒）
 APP_TIMEOUT="${APP_TIMEOUT:-180}"       # 应用就绪等待上限（秒）
@@ -105,26 +105,21 @@ cmd_start() {
     # 1. secrets 校验/生成
     cmd_init_secrets
 
-    # 2. Keycloak IdP（已有部署可跳过；等待 healthy）
-    info "启动 Keycloak..."
-    $KEYCLOAK up -d $build_flag
-    wait_healthy "$KEYCLOAK" "$INFRA_TIMEOUT" "Keycloak"
+    # 2. 基础设施 + Keycloak IdP（同一 compose，内部按 depends_on healthy 排序）
+    info "启动基础设施（perm-postgres / perm-redis / cerbos）+ Keycloak..."
+    $COMPOSE up -d $build_flag perm-postgres perm-redis cerbos keycloak
+    wait_healthy "$COMPOSE" "$INFRA_TIMEOUT" "基础设施 + Keycloak"
 
-    # 3. 权限系统基础设施（postgres / redis / cerbos，内部按 depends_on healthy 排序）
-    info "启动基础设施（perm-postgres / perm-redis / cerbos）..."
-    $COMPOSE up -d $build_flag perm-postgres perm-redis cerbos
-    wait_healthy "$COMPOSE" "$INFRA_TIMEOUT" "基础设施"
-
-    # 4. 数据库迁移（先于服务启动）
+    # 3. 数据库迁移（先于服务启动）
     cmd_migrate
 
-    # 5. 权限服务后端
+    # 4. 权限服务后端（depends_on keycloak healthy）
     info "启动 permission-service..."
     $COMPOSE up -d $build_flag permission-service
     wait_healthy "$COMPOSE" "$INFRA_TIMEOUT" "permission-service"
     wait_http "http://localhost:18080/healthz" "$APP_TIMEOUT" "permission-service(/healthz)"
 
-    # 6. 管理台前端
+    # 5. 管理台前端
     info "启动 admin-console..."
     $COMPOSE up -d $build_flag admin-console
     wait_http "http://localhost:3002" "$APP_TIMEOUT" "admin-console(:3002)"
@@ -134,7 +129,7 @@ cmd_start() {
     echo "  权限服务   http://localhost:18080   (/healthz)"
     echo "  管理台     http://localhost:3002"
     echo "  Keycloak   http://localhost:8080"
-    echo "  Cerbos     http://localhost:13592"
+    echo "  Cerbos     http://localhost:14592"
     echo "  日志       scripts/start.sh logs [-f] [服务名]"
     echo "  状态       scripts/start.sh status"
     echo ""
@@ -147,7 +142,6 @@ cmd_start() {
 
 cmd_stop() {
     $COMPOSE down
-    $KEYCLOAK down
     ok "已停止（数据卷保留）。"
 }
 
@@ -157,11 +151,7 @@ cmd_restart() {
 }
 
 cmd_status() {
-    echo "── 权限系统 ──"
     $COMPOSE ps
-    echo ""
-    echo "── Keycloak ──"
-    $KEYCLOAK ps
 }
 
 cmd_logs() {

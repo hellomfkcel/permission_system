@@ -2,11 +2,11 @@
 # 设计依据：docs/外部系统设计.md §6 部署架构 + docs/外部系统实施方案.md §12
 #
 # 启动方式:
-#   docker compose up -d perm-postgres perm-redis cerbos   # 基础设施
-#   docker compose up -d permission-service admin-console  # 应用服务
-#   docker compose up -d                                   # 全部服务
-#
-# 注意：Keycloak 在 docker-compose.keycloak.yml 中单独编排，便于与既有 IdP 部署共存。
+#   docker compose up -d perm-postgres perm-redis cerbos keycloak   # 基础设施 + Keycloak
+#   docker compose up -d permission-service admin-console           # 应用服务
+#   docker compose up -d                                            # 全部服务
+#（Keycloak 已并入本编排；既有独立 IdP 部署时可移除 keycloak 服务并改
+#  KEYCLOAK_SERVER_URL 指向既有 IdP）
 
 services:
   # ════════════════════════════════════════════════════════
@@ -55,6 +55,38 @@ services:
       - perm-network
 
   # ════════════════════════════════════════════════════════
+  # Keycloak IdP — 身份源服务
+  # 说明：已并入本编排（原 docker-compose.keycloak.yml）。
+  #       permission-service 经 http://keycloak:8080 直连；宿主 8080 端口供
+  #       admin-console 浏览器与 RAG 侧（host.docker.internal:8080）访问。
+  #       既有独立 IdP 部署时可移除本服务并改 KEYCLOAK_SERVER_URL 指向之。
+  # ════════════════════════════════════════════════════════
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: perm-keycloak
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin123
+      KC_HEALTH_ENABLED: "true"
+    command:
+      - start-dev
+      - --http-port=8080
+      - --health-enabled=true
+    ports:
+      - "8080:8080"
+    volumes:
+      - keycloak_data:/opt/keycloak/data
+    networks:
+      - perm-network
+    healthcheck:
+      test: ["CMD", "timeout", "3", "bash", "-c", "</dev/tcp/127.0.0.1/8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════
   # 权限服务后端
   # ════════════════════════════════════════════════════════
   permission-service:
@@ -69,7 +101,8 @@ services:
       CERBOS_POLICIES_DIR: /policies
       REDIS_URL: redis://:${PERM_REDIS_PASSWORD:-perm_redis_pwd_2026}@perm-redis:6379/0
       JWT_PUBLIC_KEY_PATH: /run/secrets/jwt_public_key
-      KEYCLOAK_SERVER_URL: http://host.docker.internal:8080
+      # Keycloak 同编排内直连（容器网络），不再依赖 host.docker.internal
+      KEYCLOAK_SERVER_URL: http://keycloak:8080
       KEYCLOAK_REALM: rag-v14
       KEYCLOAK_CLIENT_ID: permission-service
       KEYCLOAK_CLIENT_SECRET_FILE: /run/secrets/keycloak_client_secret
@@ -105,6 +138,8 @@ services:
       perm-redis:
         condition: service_healthy
       cerbos:
+        condition: service_healthy
+      keycloak:
         condition: service_healthy
     healthcheck:
       # 镜像内无 curl，使用 Python 探测
@@ -165,6 +200,9 @@ services:
       NEXT_PUBLIC_KEYCLOAK_URL: http://${EXTERNAL_HOST:-localhost}:8080
       NEXT_PUBLIC_KEYCLOAK_REALM: rag-v14
       NEXT_PUBLIC_KEYCLOAK_CLIENT_ID: admin-console
+      # Next.js standalone server.js 默认用容器 hostname 绑定 → DNS 解析失败(EAI_AGAIN)；
+      # 显式绑定 0.0.0.0 才能对外服务（3002:3000）。
+      HOSTNAME: "0.0.0.0"
     depends_on:
       - permission-service
     restart: unless-stopped
@@ -198,6 +236,7 @@ volumes:
   perm_pgdata:
   perm_redis_data:
   perm_cerbos_audit:
+  keycloak_data:
 
 networks:
   perm-network:

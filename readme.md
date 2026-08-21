@@ -40,21 +40,17 @@ Python 3.11 · PostgreSQL 16 · Redis 7 · Cerbos PDP · Keycloak 24+ · 一对 
 ### 开发模式
 
 ```bash
-# 1. 基础设施
-docker compose up -d perm-postgres perm-redis
-docker compose -f docker-compose.keycloak.yml up -d      # Keycloak
+# 1. 基础设施 + Keycloak IdP（Cerbos 亦含于其中，挂载本仓库策略目录）
+docker compose up -d perm-postgres perm-redis cerbos keycloak
 
-# 2. Cerbos PDP（挂载本仓库策略目录）
-docker compose up -d cerbos
-
-# 3. 权限服务
+# 2. 权限服务
 cd permission-service
 pip install -r requirements.txt
 cp .env.example .env          # 按需修改（见下方“配置”）
 alembic upgrade head
 uvicorn app.main:app --host 0.0.0.0 --port 18080 --reload
 
-# 4. 管理台
+# 3. 管理台
 cd admin-console && npm install && npm run dev            # http://localhost:3002
 ```
 
