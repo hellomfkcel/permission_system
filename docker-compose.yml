@@ -17,14 +17,16 @@ services:
     container_name: perm-postgres
     environment:
       POSTGRES_DB: permission_db
-      POSTGRES_USER: perm_user
-      POSTGRES_PASSWORD: perm_pass
+      # 生产部署必须覆盖为强口令（PRODUCTION=true 时校验拒绝默认凭据）。
+      # 注意：仅对首次初始化的空数据卷生效；既有数据卷需保留原凭据或重建。
+      POSTGRES_USER: ${POSTGRES_USER:-perm_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-perm_pass}
     ports:
       - "25433:5432"
     volumes:
       - perm_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U perm_user -d permission_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-perm_user} -d permission_db"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -38,13 +40,13 @@ services:
   perm-redis:
     image: redis:7-alpine
     container_name: perm-redis
-    command: redis-server --requirepass perm_redis_pwd_2026 --appendonly yes
+    command: redis-server --requirepass ${PERM_REDIS_PASSWORD:-perm_redis_pwd_2026} --appendonly yes
     ports:
       - "16380:6379"
     volumes:
       - perm_redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "perm_redis_pwd_2026", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${PERM_REDIS_PASSWORD:-perm_redis_pwd_2026}", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -61,11 +63,11 @@ services:
     ports:
       - "18080:8080"
     environment:
-      DATABASE_URL: postgresql+asyncpg://perm_user:perm_pass@perm-postgres:5432/permission_db
-      DATABASE_URL_SYNC: postgresql://perm_user:perm_pass@perm-postgres:5432/permission_db
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-perm_user}:${POSTGRES_PASSWORD:-perm_pass}@perm-postgres:5432/permission_db
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-perm_user}:${POSTGRES_PASSWORD:-perm_pass}@perm-postgres:5432/permission_db
       CERBOS_PDP_URL: http://cerbos:3592
       CERBOS_POLICIES_DIR: /policies
-      REDIS_URL: redis://:perm_redis_pwd_2026@perm-redis:6379/0
+      REDIS_URL: redis://:${PERM_REDIS_PASSWORD:-perm_redis_pwd_2026}@perm-redis:6379/0
       JWT_PUBLIC_KEY_PATH: /run/secrets/jwt_public_key
       KEYCLOAK_SERVER_URL: http://host.docker.internal:8080
       KEYCLOAK_REALM: rag-v14
@@ -74,12 +76,12 @@ services:
       HOST: 0.0.0.0
       PORT: 8080
       LOG_LEVEL: INFO
-      # ── P1 生产加固配置 ──
-      PRODUCTION: "true"
+      # ── 生产加固配置 ──
+      # PRODUCTION=true 会校验强凭据（DB 非默认口令、Redis 带密码、JWT 密钥在、SERVICE_API_KEY 在）。
+      # 开发环境置 false；生产必须 true 并配强口令。TLS 由外部 LB/Ingress 终结，服务内为 HTTP。
+      PRODUCTION: ${PRODUCTION:-true}
       CTX_TOKEN_SECRET_FILE: /run/secrets/ctx_token_secret
-      TLS_ENABLED: "true"
-      TLS_CERT_FILE: /run/secrets/tls_cert
-      TLS_KEY_FILE: /run/secrets/tls_key
+      TLS_ENABLED: "${TLS_ENABLED:-false}"
       # 服务间 API Key（生产环境通过 Docker secret 注入）
       SERVICE_API_KEY_FILE: /run/secrets/service_api_key
       # Keycloak admin 凭据（生产环境通过 Docker secret 注入）
@@ -127,9 +129,12 @@ services:
     image: ghcr.io/cerbos/cerbos:0.39.0
     container_name: perm-cerbos
     command: ["server", "--config=/config/.cerbos.yaml"]
+    # 宿主机端口参数化：避免与 RAG 基础设施中的 cerbos(13592) 冲突。
+    # permission-service 在容器内经 http://cerbos:3592 访问，不受宿主端口影响；
+    # 宿主端口仅用于外部调试（cerbosctl / curl）。
     ports:
-      - "13592:3592"
-      - "13593:3593"
+      - "${CERBOS_HTTP_PORT:-14592}:3592"
+      - "${CERBOS_GRPC_PORT:-14593}:3593"
     volumes:
       - ./cerbos/policies:/policies
       - ./cerbos/.cerbos.yaml:/config/.cerbos.yaml:ro
