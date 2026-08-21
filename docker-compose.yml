@@ -101,6 +101,8 @@ services:
       CERBOS_POLICIES_DIR: /policies
       REDIS_URL: redis://:${PERM_REDIS_PASSWORD:-perm_redis_pwd_2026}@perm-redis:6379/0
       JWT_PUBLIC_KEY_PATH: /run/secrets/jwt_public_key
+      # 签发会话 token 需私钥（与 RAG 共用同一密钥对；init_secrets 从 RAG_CONFIG_DIR 同步）
+      JWT_PRIVATE_KEY_PATH: /run/secrets/jwt_private_key
       # Keycloak 同编排内直连（容器网络），不再依赖 host.docker.internal
       KEYCLOAK_SERVER_URL: http://keycloak:8080
       KEYCLOAK_REALM: rag-v14
@@ -122,6 +124,7 @@ services:
       KEYCLOAK_ADMIN_PASSWORD_FILE: /run/secrets/keycloak_admin_password
     secrets:
       - jwt_public_key
+      - jwt_private_key
       - keycloak_client_secret
       - ctx_token_secret
       - tls_cert
@@ -191,11 +194,20 @@ services:
   # 通过 EXTERNAL_HOST 环境变量或 .env 文件配置（默认 localhost）。
   # ════════════════════════════════════════════════════════
   admin-console:
-    build: ./admin-console
+    build:
+      context: ./admin-console
+      args:
+        # NEXT_PUBLIC_* 构建时内联进 JS 束，浏览器按此地址访问
+        # 权限服务/Keycloak（EXTERNAL_HOST 须为浏览器可达 IP/域名，非 localhost）
+        NEXT_PUBLIC_PERMISSION_SERVICE_URL: http://${EXTERNAL_HOST:-localhost}:18080
+        NEXT_PUBLIC_KEYCLOAK_URL: http://${EXTERNAL_HOST:-localhost}:8080
+        NEXT_PUBLIC_KEYCLOAK_REALM: rag-v14
+        NEXT_PUBLIC_KEYCLOAK_CLIENT_ID: admin-console
     container_name: admin-console
     ports:
       - "3002:3000"
     environment:
+      # 运行时也保留（与服务端渲染一致）；构建期内联由 build.args 负责
       NEXT_PUBLIC_PERMISSION_SERVICE_URL: http://${EXTERNAL_HOST:-localhost}:18080
       NEXT_PUBLIC_KEYCLOAK_URL: http://${EXTERNAL_HOST:-localhost}:8080
       NEXT_PUBLIC_KEYCLOAK_REALM: rag-v14
@@ -217,6 +229,8 @@ services:
 secrets:
   jwt_public_key:
     file: ${SECRETS_DIR:-./permission-service/config}/jwt_public.pem
+  jwt_private_key:
+    file: ${SECRETS_DIR:-./permission-service/config}/jwt_private.pem
   keycloak_client_secret:
     file: ${SECRETS_DIR:-./permission-service/config}/keycloak_client_secret
   ctx_token_secret:

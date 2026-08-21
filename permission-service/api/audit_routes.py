@@ -503,9 +503,13 @@ def _get_policy_root(project_id: str | None = None) -> Path:
     支持按 project 隔离的策略目录。
     - project_id=None → 返回 policies/ 根目录（向后兼容）
     - project_id="rag-v14" → 返回 policies/rag-v14/
+
+    必须走 get_cerbos_policies_dir()（尊重 CERBOS_POLICIES_DIR env）：
+    Docker 部署中策略挂载于容器内 /policies，硬编码的仓库相对路径
+    （<repo>/cerbos/policies）在容器内不存在，会导致策略列表/部署状态误判为 0。
     """
-    import os
-    base = Path(__file__).parent.parent.parent / "cerbos" / "policies"
+    from app.config import get_cerbos_policies_dir
+    base = get_cerbos_policies_dir()
     if project_id:
         return base / project_id
     return base
