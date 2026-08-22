@@ -75,12 +75,17 @@ async def get_prefilter(
 
     # 5. 型二封禁的资源
     excluded_kbs: list[str] = []
-    # 检查所有活跃 KB 中型二封禁的
+    # 检查所有活跃 KB 中型二封禁的。banned 含 "*" 或 "{type}:*" 通配
+    # （资源级限制，principal=null → user:*）→ 对全体主体排除。
     for kb_id in kbs:
         banned = await check_resource_restriction(
             db, "kb", kb_id, principal.tenant_id, project_id,
         )
-        if banned and any(b in principal.principals for b in banned):
+        if banned and (
+            "*" in banned
+            or any(b in principal.principals for b in banned)
+            or any(b.endswith(":*") for b in banned)
+        ):
             excluded_kbs.append(kb_id)
 
     # 排除被型二封禁的 KB

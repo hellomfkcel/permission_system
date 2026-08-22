@@ -316,7 +316,13 @@ async def check_resource_restriction(
     tenant_id: str,
     project_id: str | None = None,
 ) -> list[str]:
-    """查询资源的型二封禁主体列表。"""
+    """查询资源的型二封禁主体列表。
+
+    返回被限制的主体列表。`principal` 为空的资源级限制（admin-console"型二：
+    资源限制"固定 principal=null，语义=限制该资源对全体主体）→ 返回 ["user:*"]
+    通配符（主类型通配，Milvus json_contains 可匹配；裸 "*" 在 Milvus 表达式
+    中是保留字符无法查询）——表示该资源对全体 user 主体受限；否则按具体主体返回。
+    """
     conditions = [
         Restriction.tenant_id == tenant_id,
         Restriction.restriction_type == "resource_restriction",
@@ -327,7 +333,11 @@ async def check_resource_restriction(
     _scoped(conditions, Restriction, project_id)
 
     result = await db.execute(select(Restriction.principal).where(*conditions))
-    return [row[0] for row in result.fetchall() if row[0]]
+    rows = [row[0] for row in result.fetchall()]
+    # 存在资源级限制（principal 为空）→ user 通配代表全体受限
+    if any(r is None or r == "" for r in rows):
+        return ["user:*"]
+    return [r for r in rows if r]
 
 
 async def get_resource_attr(
