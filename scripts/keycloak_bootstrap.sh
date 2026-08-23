@@ -97,14 +97,14 @@ if [ -z "$uuid" ]; then
         -s clientId=rag-frontend -s protocol=openid-connect \
         -s publicClient=true -s standardFlowEnabled=true \
         -s directAccessGrantsEnabled=false \
-        -s "redirectUris=[\"http://$EXTERNAL_HOST:3001/*\",\"http://$EXTERNAL_HOST/*\",\"http://localhost:3001/*\",\"http://localhost/*\"]" \
-        -s "webOrigins=[\"http://$EXTERNAL_HOST:3001\",\"http://$EXTERNAL_HOST\",\"http://localhost:3001\",\"http://localhost\"]"
+        -s "redirectUris=[\"http://$EXTERNAL_HOST:3001/*\",\"http://$EXTERNAL_HOST/*\",\"https://$EXTERNAL_HOST:3001/*\",\"https://$EXTERNAL_HOST/*\",\"http://localhost:3001/*\",\"http://localhost/*\",\"https://localhost:3001/*\",\"https://localhost/*\"]" \
+        -s "webOrigins=[\"http://$EXTERNAL_HOST:3001\",\"http://$EXTERNAL_HOST\",\"https://$EXTERNAL_HOST:3001\",\"https://$EXTERNAL_HOST\",\"http://localhost:3001\",\"http://localhost\"]"
     uuid=$(client_uuid rag-frontend)
 else
     ok "client rag-frontend 已存在（补齐 redirect/webOrigins）"
     $KCADM update "clients/$uuid" -r "$KC_REALM" \
-        -s "redirectUris=[\"http://$EXTERNAL_HOST:3001/*\",\"http://$EXTERNAL_HOST/*\",\"http://localhost:3001/*\",\"http://localhost/*\"]" \
-        -s "webOrigins=[\"http://$EXTERNAL_HOST:3001\",\"http://$EXTERNAL_HOST\",\"http://localhost:3001\",\"http://localhost\"]"
+        -s "redirectUris=[\"http://$EXTERNAL_HOST:3001/*\",\"http://$EXTERNAL_HOST/*\",\"https://$EXTERNAL_HOST:3001/*\",\"https://$EXTERNAL_HOST/*\",\"http://localhost:3001/*\",\"http://localhost/*\",\"https://localhost:3001/*\",\"https://localhost/*\"]" \
+        -s "webOrigins=[\"http://$EXTERNAL_HOST:3001\",\"http://$EXTERNAL_HOST\",\"https://$EXTERNAL_HOST:3001\",\"https://$EXTERNAL_HOST\",\"http://localhost:3001\",\"http://localhost\"]"
 fi
 
 # 3. admin-console（confidential，管理台 SSO）──
@@ -115,14 +115,14 @@ if [ -z "$uuid" ]; then
         -s clientId=admin-console -s protocol=openid-connect \
         -s publicClient=false -s standardFlowEnabled=true \
         -s directAccessGrantsEnabled=false \
-        -s "redirectUris=[\"http://$EXTERNAL_HOST:3002/*\",\"http://localhost:3002/*\"]" \
-        -s "webOrigins=[\"http://$EXTERNAL_HOST:3002\",\"http://localhost:3002\"]"
+        -s "redirectUris=[\"http://$EXTERNAL_HOST:3002/*\",\"https://$EXTERNAL_HOST:3002/*\",\"http://localhost:3002/*\",\"https://localhost:3002/*\"]" \
+        -s "webOrigins=[\"http://$EXTERNAL_HOST:3002\",\"https://$EXTERNAL_HOST:3002\",\"http://localhost:3002\",\"https://localhost:3002\"]"
     uuid=$(client_uuid admin-console)
 else
     ok "client admin-console 已存在（补齐 redirect/webOrigins）"
     $KCADM update "clients/$uuid" -r "$KC_REALM" \
-        -s "redirectUris=[\"http://$EXTERNAL_HOST:3002/*\",\"http://localhost:3002/*\"]" \
-        -s "webOrigins=[\"http://$EXTERNAL_HOST:3002\",\"http://localhost:3002\"]"
+        -s "redirectUris=[\"http://$EXTERNAL_HOST:3002/*\",\"https://$EXTERNAL_HOST:3002/*\",\"http://localhost:3002/*\",\"https://localhost:3002/*\"]" \
+        -s "webOrigins=[\"http://$EXTERNAL_HOST:3002\",\"https://$EXTERNAL_HOST:3002\",\"http://localhost:3002\",\"https://localhost:3002\"]"
 fi
 
 # 4. permission-service（confidential + service accounts + 写回 client secret）──

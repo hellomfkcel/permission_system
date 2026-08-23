@@ -72,11 +72,24 @@ services:
       KC_HEALTH_ENABLED: "true"
       # 固定 issuer 主机名（=浏览器可达地址），避免「浏览器经 127.0.0.1 / api 经 host-gateway」
       # 访问 Keycloak 时因 Host 头不同导致 id_token issuer 不一致而验签失败。
-      # KC_HOSTNAME_STRICT=false：仍允许经 host.docker.internal 访问（服务端调用）。
       KC_HOSTNAME: ${EXTERNAL_HOST:-localhost}
       KC_HOSTNAME_STRICT: "false"
+      # ── 生产模式（KC_START_MODE=start）配置；start-dev 下以下为空不影响 ──
+      # 运行模式：start-dev（默认/联调，H2 内置库）| start（生产，外部 postgres）
+      KC_START_MODE: ${KC_START_MODE:-start-dev}
+      # 生产模式：外部数据库（perm-postgres 的 keycloak 库）
+      KC_DB: ${KC_DB:-}
+      KC_DB_URL: ${KC_DB_URL:-}
+      KC_DB_USERNAME: ${KC_DB_USERNAME:-}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:-}
+      # 生产模式：HTTP 由 nginx/LB 终结 TLS，Keycloak 内部 HTTP + 信任反代头
+      KC_HTTP_ENABLED: ${KC_HTTP_ENABLED:-false}
+      KC_PROXY: ${KC_PROXY:-}
+      # 生产模式：bootstrap admin（KC_BOOTSTRAP_*）；start-dev 用上方 KEYCLOAK_ADMIN_*
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:-}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:-}
     command:
-      - start-dev
+      - ${KC_START_MODE:-start-dev}
       - --http-port=8080
       - --health-enabled=true
     ports:

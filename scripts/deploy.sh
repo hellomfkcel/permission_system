@@ -98,6 +98,14 @@ gen_env_if_missing() { # key [hex_length]
         ok "已生成 $key 并写入 .env"
     fi
 }
+update_env() { # key value（写入 .env，已有则覆盖；value 安全字符）
+    local k="$1" v="$2"
+    if grep -q "^${k}=" "$ENV_FILE"; then
+        sed -i "s|^${k}=.*|${k}=${v}|" "$ENV_FILE"
+    else
+        echo "${k}=${v}" >> "$ENV_FILE"
+    fi
+}
 gen_env_if_missing POSTGRES_PASSWORD 24
 gen_env_if_missing PERM_REDIS_PASSWORD 24
 
@@ -138,6 +146,28 @@ if [ -f "$RAG_CONFIG_DIR/jwt_public.pem" ] && [ -f "permission-service/config/jw
     fi
 fi
 
+# ── Keycloak 生产模式接线（KC_START_MODE=start） ───────────────
+# start-dev（默认/联调）：H2 内置库 + KEYCLOAK_ADMIN_*。
+# start（生产）：外部 postgres（perm-postgres 的 keycloak 库）+ KC_BOOTSTRAP_* + 反代头。
+KC_START_MODE="${KC_START_MODE:-start-dev}"
+if [ "$KC_START_MODE" = "start" ]; then
+    if [ -z "$POSTGRES_PASSWORD" ]; then set -a; source "$ENV_FILE"; set +a; fi
+    update_env KC_START_MODE start
+    update_env KC_DB postgres
+    update_env KC_DB_URL "jdbc:postgresql://perm-postgres:5432/keycloak"
+    update_env KC_DB_USERNAME "perm_user"
+    update_env KC_DB_PASSWORD "$POSTGRES_PASSWORD"
+    update_env KC_HTTP_ENABLED true
+    update_env KC_PROXY edge
+    update_env KC_BOOTSTRAP_ADMIN_USERNAME "${KEYCLOAK_ADMIN_USERNAME:-admin}"
+    update_env KC_BOOTSTRAP_ADMIN_PASSWORD "$KC_ADMIN_PASSWORD"
+    info "KC_START_MODE=start（生产模式）：外部 postgres 库 + 反代头 + bootstrap admin"
+else
+    update_env KC_START_MODE start-dev
+    ok "KC_START_MODE=start-dev（联调模式）：H2 内置库"
+fi
+set -a; source "$ENV_FILE"; set +a
+
 # ── 4. 起基础设施 + Keycloak，等待 healthy ───────────────────────
 info "启动基础设施 + Keycloak（$INFRA_SERVICES）..."
 $COMPOSE up -d $INFRA_SERVICES
@@ -170,7 +200,16 @@ if [ -n "$_KCN" ] && [ "$_KCN" != "$KC_ADMIN_PASSWORD" ]; then
 fi
 ok "keycloak 口令已注入（与 secret 一致）"
 
-# ── 5. Keycloak realm/client/roles/mappers 幂等导入 ───────────────
+# ── 5. Keycloak 生产模式：确保 keycloak 数据库存在（perm-postgres） ──
+if [ "$KC_START_MODE" = "start" ]; then
+    info "确保 perm-postgres 中 keycloak 数据库存在..."
+    docker compose exec -T perm-postgres psql -U perm_user -d permission_db -tAc \
+        "SELECT 1 FROM pg_database WHERE datname='keycloak'" 2>/dev/null | grep -q 1 \
+        || docker compose exec -T perm-postgres psql -U perm_user -d permission_db -c "CREATE DATABASE keycloak" 2>&1 | tail -1
+    ok "keycloak 数据库就绪（perm-postgres/keycloak）"
+fi
+
+# ── 6. Keycloak realm/client/roles/mappers 幂等导入 ───────────────
 info "Keycloak realm/client 自动导入（kcadm）..."
 bash scripts/keycloak_bootstrap.sh || fail "keycloak_bootstrap 失败"
 
