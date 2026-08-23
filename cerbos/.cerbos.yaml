@@ -16,4 +16,7 @@ audit:
   backend: local
   local:
     storagePath: /audit
-    retentionPeriod: 168h
+    # 保留期 720h（30 天）= Cerbos local backend 上限；本地 audit 卷已纳入
+    # scripts/backup.sh 备份（cerbos-audit.tar.gz），备份+保留双保险。
+    # 更长期保留需集中化（Kafka/远程 audit sink），列为后续演进。
+    retentionPeriod: 720h

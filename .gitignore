@@ -22,3 +22,4 @@ node_modules/
 **/config/tls_cert
 **/config/keycloak_admin_username
 **/config/keycloak_admin_password
+backups/

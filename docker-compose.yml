@@ -22,7 +22,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-perm_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-perm_pass}
     ports:
-      - "${PERM_POSTGRES_HOST_PORT:-25433}:5432"
+      - "127.0.0.1:${PERM_POSTGRES_HOST_PORT:-25433}:5432"
     volumes:
       - perm_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -42,6 +42,7 @@ services:
     container_name: perm-redis
     command: redis-server --requirepass ${PERM_REDIS_PASSWORD:-perm_redis_pwd_2026} --appendonly yes
     ports:
+      # perm-redis 需被 RAG 容器经 host-gateway 访问（visibility-events 订阅），不能绑 loopback
       - "${PERM_REDIS_HOST_PORT:-16380}:6379"
     volumes:
       - perm_redis_data:/data
@@ -66,8 +67,14 @@ services:
     container_name: perm-keycloak
     environment:
       KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin123
+      # 生产由 deploy 注入强口令；缺省 admin123 仅供本地开发（deploy 脚本 PRODUCTION 下强制）
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin123}
       KC_HEALTH_ENABLED: "true"
+      # 固定 issuer 主机名（=浏览器可达地址），避免「浏览器经 127.0.0.1 / api 经 host-gateway」
+      # 访问 Keycloak 时因 Host 头不同导致 id_token issuer 不一致而验签失败。
+      # KC_HOSTNAME_STRICT=false：仍允许经 host.docker.internal 访问（服务端调用）。
+      KC_HOSTNAME: ${EXTERNAL_HOST:-localhost}
+      KC_HOSTNAME_STRICT: "false"
     command:
       - start-dev
       - --http-port=8080
@@ -171,8 +178,8 @@ services:
     # permission-service 在容器内经 http://cerbos:3592 访问，不受宿主端口影响；
     # 宿主端口仅用于外部调试（cerbosctl / curl）。
     ports:
-      - "${CERBOS_HTTP_PORT:-14592}:3592"
-      - "${CERBOS_GRPC_PORT:-14593}:3593"
+      - "127.0.0.1:${CERBOS_HTTP_PORT:-14592}:3592"
+      - "127.0.0.1:${CERBOS_GRPC_PORT:-14593}:3593"
     volumes:
       - ./cerbos/policies:/policies
       - ./cerbos/.cerbos.yaml:/config/.cerbos.yaml:ro
@@ -218,6 +225,12 @@ services:
     depends_on:
       - permission-service
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok||r.status===307?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     networks:
       - perm-network
     extra_hosts:

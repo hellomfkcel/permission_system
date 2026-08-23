@@ -122,6 +122,10 @@ class Settings(BaseSettings):
     prefilter_rate_limit: int = 500    # /v1/prefilter req/s
     visibility_rate_limit: int = 200   # /v1/visibility req/s — 盖戳管道高频调用
 
+    # 可信反代 IP 白名单（逗号分隔）。反代后限流按 X-Forwarded-For 首跳区分客户端；
+    # 未配置时仅按直连对端 IP 限流（防伪造 XFF）。生产配置为 LB/Ingress 的出口 IP。
+    trusted_proxy_ips: str = ""
+
     # TLS / HTTPS
     # 开发环境默认不启用 TLS。生产环境通过环境变量配置：
     #   TLS_ENABLED=true

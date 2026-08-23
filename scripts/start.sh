@@ -12,6 +12,20 @@
 #   scripts/start.sh migrate         # 手动执行数据库迁移（alembic upgrade head）
 #   scripts/start.sh init-secrets    # 校验/生成 secret 文件（幂等）
 #
+#   BUILD=1 scripts/start.sh start   # 强制重建镜像（代码有变更时）；默认 BUILD=0 复用已有镜像秒起
+#
+# ── 快速开始：首次启动 ─────────────────────────────────────────────
+# 1) cp .env.example .env，填写 POSTGRES_PASSWORD / PERM_REDIS_PASSWORD / EXTERNAL_HOST 等必需变量
+# 2) scripts/start.sh start
+#    自动完成：init_secrets（幂等）→ 基础设施+Keycloak → alembic 迁移 → 权限服务 → 管理台。
+#    首次镜像缺失时 compose 自动构建（BUILD=0 下镜像缺失仍会 build）。
+#    前提：Keycloak realm/client 已配置（或指向既有 IdP）；RAG 侧密钥已同步（见依赖）。
+# ── 快速开始：日常运行（镜像已存在，代码无变更）────────────────────
+# scripts/start.sh start            # 复用镜像，秒起（BUILD=0 默认，不构建）
+# scripts/start.sh restart          # 同上
+# ── 代码有变更后 ────────────────────────────────────────────────────
+# BUILD=1 scripts/start.sh start    # 强制重建镜像后再启动（否则跑旧镜像）
+#
 # 依赖：
 #   - Keycloak（本编排内 keycloak 服务或既有 IdP），realm/client 已配置
 #   - scripts/init_secrets.sh 可用的 openssl
@@ -27,7 +41,7 @@ COMPOSE="docker compose -f docker-compose.yml"
 
 INFRA_TIMEOUT="${INFRA_TIMEOUT:-180}"   # 基础设施健康等待上限（秒）
 APP_TIMEOUT="${APP_TIMEOUT:-180}"       # 应用就绪等待上限（秒）
-BUILD="${BUILD:-1}"                     # 1=构建镜像，0=仅拉取/复用已有镜像
+BUILD="${BUILD:-0}"                     # 1=强制重建镜像，0=复用已有镜像（默认）
 
 info() { echo -e "\033[36m[i]\033[0m $*"; }
 ok()   { echo -e "\033[32m[✓]\033[0m $*"; }
@@ -177,6 +191,7 @@ case "${1:-help}" in
     logs)          shift; cmd_logs "$@" ;;
     migrate)       shift; cmd_migrate "$@" ;;
     init-secrets)  shift; cmd_init_secrets "$@" ;;
+    backup)        bash scripts/backup.sh ;;
     help|--help|-h) cmd_help ;;
     *)             fail "未知命令: $1（可用: start|stop|restart|status|logs|migrate|init-secrets|help）" ;;
 esac
