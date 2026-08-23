@@ -29,7 +29,7 @@ cd "$REPO_ROOT"
 
 COMPOSE="docker compose"
 INFRA_SERVICES="perm-postgres perm-redis cerbos keycloak"
-APP_SERVICES="permission-service admin-console"
+APP_SERVICES="permission-service admin-console permission-nginx"
 INFRA_TIMEOUT="${INFRA_TIMEOUT:-180}"
 APP_TIMEOUT="${APP_TIMEOUT:-120}"
 BUILD="${BUILD:-0}"
@@ -37,7 +37,14 @@ BUILD="${BUILD:-0}"
 # .env 里的旧 PRODUCTION=false 是仓库开发默认，会被下方「生产强制」块覆盖，不在此覆盖部署意图。
 PRODUCTION_INTENT="${PRODUCTION:-true}"
 PRODUCTION="$PRODUCTION_INTENT"
-RAG_CONFIG_DIR="${RAG_CONFIG_DIR:-/home/mfkcel/proj_rag_dev/config}"
+# JWT 密钥来源（RAG 为权威）：优先 sibling 目录自动识别（verify_deploy 等新位置），
+# 其次默认旧路径；均可被 RAG_CONFIG_DIR 覆盖。
+RAG_CONFIG_DIR="${RAG_CONFIG_DIR:-}"
+if [ -z "$RAG_CONFIG_DIR" ] && [ -d "$REPO_ROOT/../proj_rag_dev/config" ]; then
+    RAG_CONFIG_DIR="$(cd "$REPO_ROOT/../proj_rag_dev/config" && pwd)"
+elif [ -z "$RAG_CONFIG_DIR" ]; then
+    RAG_CONFIG_DIR="/home/mfkcel/proj_rag_dev/config"
+fi
 ENV_FILE="$REPO_ROOT/.env"
 
 info() { echo -e "\033[36m[i]\033[0m $*"; }
@@ -79,6 +86,8 @@ if [ -z "$KC_ADMIN_PASSWORD" ]; then
     fi
 fi
 export KEYCLOAK_ADMIN_PASSWORD
+# init_secrets 生成 keycloak_admin_username 也需要（默认 admin，可覆盖）
+export KEYCLOAK_ADMIN_USERNAME="${KEYCLOAK_ADMIN_USERNAME:-admin}"
 # 同时写入 .env 供 compose 插值（比依赖 shell export 更稳），并持久化到 secret 文件
 if grep -q '^KEYCLOAK_ADMIN_PASSWORD=' "$ENV_FILE" 2>/dev/null; then
     sed -i "s|^KEYCLOAK_ADMIN_PASSWORD=.*|KEYCLOAK_ADMIN_PASSWORD=${KC_ADMIN_PASSWORD}|" "$ENV_FILE"
@@ -168,6 +177,19 @@ else
 fi
 set -a; source "$ENV_FILE"; set +a
 
+# admin-console 浏览器侧 Keycloak 地址（生产经 RAG nginx /realms 为 https://EXTERNAL_HOST；
+# 不用硬编码 IP；可 env 覆盖）
+# admin-console 直连 Keycloak 端口（不依赖 RAG nginx /realms 反代）：
+# 权限平台必须独立，RAG 停摆不影响其 SSO。可 env 覆盖（如走独立 LB/TLS）。
+update_env NEXT_PUBLIC_KEYCLOAK_URL "${NEXT_PUBLIC_KEYCLOAK_URL:-http://${EXTERNAL_HOST}:${PERMISSION_NGINX_PORT:-18081}}"
+# permission-service 是 HTTP（18080，无 TLS）——浏览器直连必须 http，否则 fetch https:18080 失败
+# → 侧栏灰 + dashboard 统计错误。生产如需 HTTPS，由独立 LB 终结后改此值。
+update_env NEXT_PUBLIC_PERMISSION_SERVICE_URL "${NEXT_PUBLIC_PERMISSION_SERVICE_URL:-http://${EXTERNAL_HOST}:${PERMISSION_SERVICE_HOST_PORT:-18080}}"
+# CORS：管理台浏览器来源（避免 config.py 默认硬编码 IP）；可 env 覆盖
+# CORS：管理台浏览器来源。admin-console 由 Next.js 以 HTTP 服务（3002），
+# 来源是 http://EXTERNAL_HOST:3002（非 https）。可 env 覆盖。
+update_env ALLOWED_ORIGINS "${ALLOWED_ORIGINS:-http://${EXTERNAL_HOST}:${PERMISSION_NGINX_PORT:-18081},http://localhost:3002}"
+
 # ── 4. 起基础设施 + Keycloak，等待 healthy ───────────────────────
 info "启动基础设施 + Keycloak（$INFRA_SERVICES）..."
 $COMPOSE up -d $INFRA_SERVICES
@@ -222,8 +244,8 @@ ok "数据库迁移完成"
 build_flag=""; [ "$BUILD" = "1" ] && build_flag="--build"
 # JWT 轮换同步后需强制重建 permission-service（Docker secret 在容器创建时快照）
 [ "$NEED_RECREATE_PERM" = "1" ] && build_flag="$build_flag --force-recreate permission-service"
-info "启动 permission-service / admin-console..."
-$COMPOSE up -d $build_flag permission-service admin-console
+info "启动 $APP_SERVICES ..."
+$COMPOSE up -d $build_flag $APP_SERVICES
 
 # 验证
 local_waited=0
@@ -242,10 +264,30 @@ if [ -f "permission-service/config/service_api_key" ]; then
     ok "service_api_key 已就绪（RAG 侧 AUTHZ_CLIENT_CREDENTIAL 需与此一致；同主机 deploy 会自动读取）"
 fi
 
+# 确保 project_api_keys 与当前 config 的 service_api_key 一致（轮换/重生成后 bootstrap 只种空库，
+# 旧库需同步；否则 RAG 侧 key 校验 401 → fail-closed 503）
+# 哈希必须与权限服务一致：sha256(key) 且 key 不含末尾换行（sha256sum 会把文件换行算进去 → 校验失配 401）
+NEWKEY_HASH="$(tr -d '\n\r' < permission-service/config/service_api_key | sha256sum | awk '{print $1}')"
+docker exec permission-service sh -c "python3 -c \"
+import asyncio
+from app.database import async_session
+from sqlalchemy import text
+async def _sync():
+    async with async_session() as s:
+        rows = await s.execute(text(\\\"SELECT project_id, key_hash FROM project_api_keys\\\"))
+        for r in rows:
+            if r.key_hash != '$NEWKEY_HASH':
+                await s.execute(text(\\\"UPDATE project_api_keys SET key_hash='$NEWKEY_HASH' WHERE project_id=:p\\\").bindparams(p=r.project_id))
+                print('synced project_api_keys:', r.project_id, '->', '$NEWKEY_HASH'[:12])
+        await s.commit()
+asyncio.run(_sync())
+\"" 2>&1 | tail -2
+ok "project_api_keys 已与当前 service_api_key 对齐"
+
 echo ""
 echo "══════ 权限系统已部署 ══════"
 echo "  permission-service   http://${EXTERNAL_HOST}:${PERMISSION_SERVICE_HOST_PORT:-18080}  (/healthz)"
-echo "  管理台                http://${EXTERNAL_HOST}:${ADMIN_CONSOLE_HOST_PORT:-3002}"
+echo "  管理台                http://${EXTERNAL_HOST}:${PERMISSION_NGINX_PORT:-18081}  (permission-nginx 统一入口)"
 echo "  Keycloak             http://${EXTERNAL_HOST}:${KEYCLOAK_HOST_PORT:-8080}"
 echo "  PRODUCTION=${PRODUCTION}"
 echo ""

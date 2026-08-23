@@ -174,3 +174,43 @@ perm-service-client/    Python SDK
 cerbos/policies/        Cerbos 策略（platform/ + 各项目目录）
 docker-compose*.yml     编排
 ```
+
+---
+
+## 生产部署与初始账号
+
+### 生产部署
+
+```bash
+KC_START_MODE=start bash scripts/deploy.sh    # 生产（外部 postgres + realm 自动导入）
+BUILD=1 bash scripts/deploy.sh                # 强制重建镜像
+```
+
+`deploy.sh`：生成强口令/密钥 → `init_secrets`（9 个 secret，含从 RAG 同步 JWT 密钥）→
+起基础设施 + Keycloak → **kcadm 幂等导入 realm/client/roles/mappers** → alembic 迁移 →
+起 permission-service + admin-console + **permission-nginx**（独立入口）。
+
+**访问入口**：
+| 入口 | 地址 |
+|------|------|
+| 权限管理台 | `http://192.168.1.127:18081`（permission-nginx，独立于 RAG） |
+| Keycloak 管理台 | `http://192.168.1.127:18081/admin` |
+| RAG 前端（SSO） | `https://192.168.1.127/login` |
+
+### 初始账号
+
+| 账号 | 密码 | 角色 | 说明 |
+|------|------|------|------|
+| `admin` | `Admin@44545780` | `system_admin` | 权限平台 + RAG 超管（rag-v14 realm 业务账号） |
+| `testuser` | `testpass123456` | `user` | 普通只读，联调/演示用 |
+| Keycloak master | `admin` | master 管理员 | 口令在 `permission-service/config/keycloak_admin_password` |
+
+### 新用户创建
+
+1. Keycloak 管理台（`http://192.168.1.127:18081/admin`，master admin 登录）→ 切 realm `rag-v14`
+   → Users → Add user → 设密码 → Role Mapper 勾 `system_admin`/`user` → Attributes 加 `tenant_id`。
+2. 管理台 → **👥 用户与组 → 从 Keycloak 同步**。
+3. 给 `user:<用户名>` 授 RAG 角色绑定（`kb_reader`/`kb_writer`）。
+
+> ⚠️ 项目管理员会授予项目内全部知识库写/管理权限，给 RAG 只读用户请用角色绑定，勿用项目管理员。
+> 详细：`docs/ops/权限系统上线运维手册.md` §2.2 与 §9（部署问题实录）。

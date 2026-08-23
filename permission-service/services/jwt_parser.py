@@ -91,6 +91,73 @@ def _resolve_credential_from_ctx_token(credential: str) -> str:
     return inner_credential
 
 
+# ── Keycloak JWKS（admin-console 的 Keycloak 签发 token 验签）────────
+# parse_principal 默认用 RAG 共享公钥（RAG 自签 token）。admin-console 的
+# Keycloak access_token 由 Keycloak 私钥签名，需经 realm JWKS 验签。缓存 1h。
+_keycloak_jwks_keys: list | None = None
+_keycloak_jwks_ts: float = 0.0
+
+
+def _keycloak_jwks() -> list:
+    """获取并缓存 Keycloak realm JWKS 公钥列表。失败返回空列表。"""
+    global _keycloak_jwks_keys, _keycloak_jwks_ts
+    now = time.time()
+    if _keycloak_jwks_keys and (now - _keycloak_jwks_ts) < 3600:
+        return _keycloak_jwks_keys
+
+    url = (
+        f"{settings.keycloak_server_url.rstrip('/')}"
+        f"/realms/{settings.keycloak_realm}/protocol/openid-connect/certs"
+    )
+    try:
+        import httpx
+        resp = httpx.get(url, timeout=5.0)
+        resp.raise_for_status()
+        _keycloak_jwks_keys = (resp.json() or {}).get("keys", [])
+        _keycloak_jwks_ts = now
+    except Exception:
+        _keycloak_jwks_keys = []
+    return _keycloak_jwks_keys
+
+
+def _decode_with_keycloak_jwks(credential: str, algorithm: str, opts: dict) -> dict:
+    """用 Keycloak realm JWKS 验签（admin-console 的 Keycloak 签发 token）。
+
+    校验 issuer 必须是配置的 Keycloak realm（支持外部 https://EXTERNAL_HOST/realms/{realm}）。
+    """
+    keys = _keycloak_jwks()
+    if not keys:
+        raise JoseJWTError("Keycloak JWKS unavailable")
+
+    unverified = jwt.get_unverified_claims(credential)
+    token_iss = unverified.get("iss", "")
+    if f"/realms/{settings.keycloak_realm}" not in token_iss:
+        raise JoseJWTError(f"Issuer '{token_iss}' is not the Keycloak realm {settings.keycloak_realm}")
+
+    header = jwt.get_unverified_header(credential)
+    kid = header.get("kid")
+    candidates = [k for k in keys if k.get("kid") == kid]
+    if not candidates:
+        candidates = [k for k in keys if k.get("alg", "").startswith("RS")]
+
+    last_err: JoseJWTError | None = None
+    for key in candidates:
+        try:
+            return jwt.decode(credential, key, algorithms=[algorithm], options=opts)
+        except JoseJWTError as exc:
+            last_err = exc
+    raise last_err or JoseJWTError("no matching Keycloak JWKS key")
+
+
+def _decode_jwt(credential: str, public_key: str, algorithm: str, issuer: str | None, opts: dict) -> dict:
+    """按序验签：① RAG 共享公钥（RAG 自签 token）→ ② Keycloak realm JWKS（admin-console token）。"""
+    try:
+        return jwt.decode(credential, public_key, algorithms=[algorithm], issuer=issuer, options=opts)
+    except JoseJWTError:
+        # RAG 公钥验不过 → 可能是 Keycloak 签发的 admin-console token
+        return _decode_with_keycloak_jwks(credential, algorithm, opts)
+
+
 def parse_principal(credential: str) -> Principal:
     """从 JWT credential（或 ctx_token）构建 Principal 对象。
 
@@ -120,12 +187,12 @@ def parse_principal(credential: str) -> Principal:
             issuer = allowed[0]  # jose 只接受单个 issuer 字符串
             # 若 token issuer 不在白名单，jose 会抛出 JWTError
 
-    claims: dict = jwt.decode(
+    claims: dict = _decode_jwt(
         credential,
         public_key,
-        algorithms=[settings.jwt_algorithm],
-        issuer=issuer,
-        options=decode_opts,
+        settings.jwt_algorithm,
+        issuer,
+        decode_opts,
     )
 
     # 若配置了多 issuer 白名单但 jose 只支持单 issuer，

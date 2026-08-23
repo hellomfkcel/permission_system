@@ -454,6 +454,47 @@ async def get_active_kbs_for_principal(
             if row[0] not in kb_ids:
                 kb_ids.append(row[0])
 
+    # 角色绑定源：principal 持有的角色若适用于 KB（全资源或指定 KB），纳入可访问 KB。
+    # 与决策路径一致（resolve_bound_roles 已按角色绑定授予）；prefilter 之前漏了此源，
+    # 导致只有角色绑定（如 user:admin→platform_admin_role 全资源）无 KB ACL 的超级管理员
+    # 返回 kbs:[] → 检索预过滤 0 结果。
+    rb_conditions = [
+        RoleBinding.principal.in_(principals),
+        RoleBinding.tenant_id == tenant_id,
+        RoleBinding.revoked == False,  # noqa: E712
+        or_(
+            RoleBinding.resource_type.is_(None),
+            RoleBinding.resource_type == "kb",
+        ),
+    ]
+    if project_id is not None:
+        rb_conditions.append(or_(
+            RoleBinding.project_id.is_(None),
+            RoleBinding.project_id == project_id,
+        ))
+    rb_result = await db.execute(
+        select(RoleBinding.resource_id).where(*rb_conditions).distinct()
+    )
+    rb_all = False
+    for row in rb_result.fetchall():
+        rid = row[0]
+        if rid is None:
+            rb_all = True  # 全资源绑定 → 全部活跃 KB
+        elif rid not in kb_ids:
+            kb_ids.append(rid)
+
+    if rb_all:
+        all_cond = [
+            ResourceRegistry.resource_type == "kb",
+            ResourceRegistry.tenant_id == tenant_id,
+            ResourceRegistry.retired == False,  # noqa: E712
+        ]
+        _scoped(all_cond, ResourceRegistry, project_id)
+        all_res = await db.execute(select(ResourceRegistry.resource_id).where(*all_cond))
+        for r in all_res.fetchall():
+            if r[0] not in kb_ids:
+                kb_ids.append(r[0])
+
     # 过滤 retired
     if kb_ids:
         active_conditions = [
@@ -504,7 +545,11 @@ async def get_allow_stamps_for_channel(
         ACLEntry.revoked == False,  # noqa: E712
         or_(ACLEntry.expires_at.is_(None), ACLEntry.expires_at > now),
     ]
-    _scoped(doc_conditions, ACLEntry, project_id)
+    if project_id is not None:
+        doc_conditions.append(or_(
+            ACLEntry.project_id.is_(None),
+            ACLEntry.project_id == project_id,
+        ))
     doc_result = await db.execute(select(ACLEntry.principal).where(*doc_conditions))
     for row in doc_result.fetchall():
         _add(row[0])
@@ -519,7 +564,11 @@ async def get_allow_stamps_for_channel(
         ACLEntry.revoked == False,  # noqa: E712
         or_(ACLEntry.expires_at.is_(None), ACLEntry.expires_at > now),
     ]
-    _scoped(kb_conditions, ACLEntry, project_id)
+    if project_id is not None:
+        kb_conditions.append(or_(
+            ACLEntry.project_id.is_(None),
+            ACLEntry.project_id == project_id,
+        ))
     kb_result = await db.execute(select(ACLEntry.principal).where(*kb_conditions))
     for row in kb_result.fetchall():
         _add(row[0])
@@ -527,6 +576,8 @@ async def get_allow_stamps_for_channel(
     # ── 源 3：角色绑定 ──
     # 只使用原始 principal 作为戳记，不加 role: 前缀：
     # 角色绑定表示该 principal 持有某角色，戳记须与 JWT principals 中的形式一致。
+    # 项目过滤须包含 project_id IS NULL 的全局/平台绑定（如 user:admin→platform_admin_role
+    # project_id=NULL）：否则平台管理员角色绑定的主体不会出现在可见性戳里 → 检索预过滤 0 结果。
     role_conditions = [
         RoleBinding.revoked == False,  # noqa: E712
         RoleBinding.tenant_id == tenant_id,
@@ -535,7 +586,11 @@ async def get_allow_stamps_for_channel(
             RoleBinding.resource_id == kb_id,
         ),
     ]
-    _scoped(role_conditions, RoleBinding, project_id)
+    if project_id is not None:
+        role_conditions.append(or_(
+            RoleBinding.project_id.is_(None),
+            RoleBinding.project_id == project_id,
+        ))
     role_result = await db.execute(
         select(RoleBinding.principal).where(*role_conditions)
     )

@@ -43,7 +43,7 @@ interface AuthState {
 /** Keycloak OIDC token endpoint — 从环境变量读取，支持不同环境部署。
  *
  * 开发环境 (.env.local):
- *   NEXT_PUBLIC_KEYCLOAK_URL=http://192.168.1.127:8080
+ *   NEXT_PUBLIC_KEYCLOAK_URL=https://<EXTERNAL_HOST>  （deploy 注入，支持 https/域名）
  *   NEXT_PUBLIC_KEYCLOAK_REALM=rag-v14
  *   NEXT_PUBLIC_KEYCLOAK_CLIENT_ID=admin-console
  *
@@ -113,6 +113,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       localStorage.removeItem("admin_token_expires_at");
       localStorage.removeItem("admin_current_project");
       document.cookie = "admin_session=; path=/; max-age=0";
+      // 结束 Keycloak SSO 会话：否则"退出"后 Keycloak 会话仍在，再点 SSO 直接免密进入。
+      // 经 permission-nginx :18081 调 end_session，post_logout_redirect_uri 跳回管理台 /login。
+      const kcUrl = process.env.NEXT_PUBLIC_KEYCLOAK_URL || window.location.origin;
+      const realm = process.env.NEXT_PUBLIC_KEYCLOAK_REALM || "rag-v14";
+      const clientId = process.env.NEXT_PUBLIC_KEYCLOAK_CLIENT_ID || "admin-console";
+      const postLogout = encodeURIComponent(`${window.location.origin}/login`);
+      window.location.href =
+        `${kcUrl}/realms/${realm}/protocol/openid-connect/logout` +
+        `?client_id=${clientId}&post_logout_redirect_uri=${postLogout}`;
     }
     set({ token: null, user: null, isAuthenticated: false, currentProjectId: null, availableProjects: [] });
   },

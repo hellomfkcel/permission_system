@@ -61,7 +61,8 @@ done
 if have_file service_api_key; then
     ok "service_api_key 已存在（跳过）"
 else
-    gen_hex 32 | sed 's/^/psk_/' > "$SECRETS_DIR/service_api_key"
+    # printf '%s'（无末尾换行）：换行会让 deploy.sh 的 sha256sum 与权限服务 sha256(key) 失配 → 401
+    printf 'psk_%s' "$(gen_hex 32)" > "$SECRETS_DIR/service_api_key"
     chmod 600 "$SECRETS_DIR/service_api_key"
     ok "service_api_key 已生成（需同步到 RAG 的 AUTHZ_CLIENT_CREDENTIAL）"
 fi

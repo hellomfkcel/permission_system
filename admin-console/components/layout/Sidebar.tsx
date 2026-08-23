@@ -4,7 +4,7 @@
 
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -66,19 +66,15 @@ export default function Sidebar() {
     router.push("/login");
   };
 
-  // Load projects and platform permissions on mount
-  const [loaded, setLoaded] = useState(false);
+  // 加载项目与平台权限——依赖 token：侧栏在 /login 也挂载（无 token），若用一次性 loaded 守卫，
+  // SSO 登录后 token 变化但守卫已置位 → loadAccess 永不执行 → 侧栏灰（需刷新才恢复）。
+  // 改为 token 就绪即加载（loadProjects/loadAccess 幂等，token 变化重跑安全）。
   useEffect(() => {
-    if (!loaded) {
-      loadProjects();
-      // Load platform permissions
-      const storedToken = token || (typeof window !== "undefined" ? localStorage.getItem("admin_token") : null);
-      if (storedToken) {
-        loadAccess(storedToken);
-      }
-      setLoaded(true);
-    }
-  }, [loaded, loadProjects, loadAccess, token]);
+    const storedToken = token || (typeof window !== "undefined" ? localStorage.getItem("admin_token") : null);
+    if (!storedToken) return;
+    loadProjects();
+    loadAccess(storedToken);
+  }, [token, loadProjects, loadAccess]);
 
   const currentProject = availableProjects.find(p => p.id === currentProjectId);
   const isPlatformMode = !currentProjectId || currentProjectId === "__all__" || currentProjectId === "";

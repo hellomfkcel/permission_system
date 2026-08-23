@@ -70,10 +70,15 @@ services:
       # 生产由 deploy 注入强口令；缺省 admin123 仅供本地开发（deploy 脚本 PRODUCTION 下强制）
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin123}
       KC_HEALTH_ENABLED: "true"
-      # 固定 issuer 主机名（=浏览器可达地址），避免「浏览器经 127.0.0.1 / api 经 host-gateway」
-      # 访问 Keycloak 时因 Host 头不同导致 id_token issuer 不一致而验签失败。
-      KC_HOSTNAME: ${EXTERNAL_HOST:-localhost}
+      # 固定 issuer 主机名 + 端口：两系统 IdP 统一走 http://EXTERNAL_HOST:18081（permission-nginx），
+      # 权限平台独立于 RAG nginx。Keycloak 无法为 http/https 分离前端端口（v1/v2 provider 均按
+      # scheme 默认端口），故 RAG 的 IdP 交互也用 :18081（http）。
+      KC_HOSTNAME: ${EXTERNAL_HOST:-localhost}:${PERMISSION_NGINX_PORT:-18081}
       KC_HOSTNAME_STRICT: "false"
+      # 关键：strict-https=false → Keycloak 按访问方式生成 URL（直连 http:8080 用 http；
+      # 经 RAG nginx https 反代用 https）。否则强制 https，表单提交走 RAG nginx →
+      # 权限平台被 RAG 绑架（RAG 不启动就无法 Keycloak 登录）。
+      KC_HOSTNAME_STRICT_HTTPS: "false"
       # ── 生产模式（KC_START_MODE=start）配置；start-dev 下以下为空不影响 ──
       # 运行模式：start-dev（默认/联调，H2 内置库）| start（生产，外部 postgres）
       KC_START_MODE: ${KC_START_MODE:-start-dev}
@@ -219,17 +224,17 @@ services:
       args:
         # NEXT_PUBLIC_* 构建时内联进 JS 束，浏览器按此地址访问
         # 权限服务/Keycloak（EXTERNAL_HOST 须为浏览器可达 IP/域名，非 localhost）
-        NEXT_PUBLIC_PERMISSION_SERVICE_URL: http://${EXTERNAL_HOST:-localhost}:${PERMISSION_SERVICE_HOST_PORT:-18080}
-        NEXT_PUBLIC_KEYCLOAK_URL: http://${EXTERNAL_HOST:-localhost}:${KEYCLOAK_HOST_PORT:-8080}
+        NEXT_PUBLIC_PERMISSION_SERVICE_URL: ${NEXT_PUBLIC_PERMISSION_SERVICE_URL:-http://${EXTERNAL_HOST:-localhost}:${PERMISSION_SERVICE_HOST_PORT:-18080}}
+        NEXT_PUBLIC_KEYCLOAK_URL: ${NEXT_PUBLIC_KEYCLOAK_URL:-http://${EXTERNAL_HOST:-localhost}:${PERMISSION_NGINX_PORT:-18081}}
         NEXT_PUBLIC_KEYCLOAK_REALM: rag-v14
         NEXT_PUBLIC_KEYCLOAK_CLIENT_ID: admin-console
     container_name: admin-console
     ports:
       - "${ADMIN_CONSOLE_HOST_PORT:-3002}:3000"
     environment:
-      # 运行时也保留（与服务端渲染一致）；构建期内联由 build.args 负责
-      NEXT_PUBLIC_PERMISSION_SERVICE_URL: http://${EXTERNAL_HOST:-localhost}:${PERMISSION_SERVICE_HOST_PORT:-18080}
-      NEXT_PUBLIC_KEYCLOAK_URL: http://${EXTERNAL_HOST:-localhost}:${KEYCLOAK_HOST_PORT:-8080}
+      # 运行时也保留（与服务端渲染一致）；构建期内联由 build.args 负责（deploy 注入 https/域名）
+      NEXT_PUBLIC_PERMISSION_SERVICE_URL: ${NEXT_PUBLIC_PERMISSION_SERVICE_URL:-http://${EXTERNAL_HOST:-localhost}:${PERMISSION_SERVICE_HOST_PORT:-18080}}
+      NEXT_PUBLIC_KEYCLOAK_URL: ${NEXT_PUBLIC_KEYCLOAK_URL:-http://${EXTERNAL_HOST:-localhost}:${PERMISSION_NGINX_PORT:-18081}}
       NEXT_PUBLIC_KEYCLOAK_REALM: rag-v14
       NEXT_PUBLIC_KEYCLOAK_CLIENT_ID: admin-console
       # Next.js standalone server.js 默认用容器 hostname 绑定 → DNS 解析失败(EAI_AGAIN)；
@@ -248,6 +253,28 @@ services:
       - perm-network
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  # ── 权限平台独立入口 ──
+  # 让权限系统不依赖 RAG nginx：/realms → Keycloak、/ → admin-console。
+  # RAG 停摆不影响权限平台登录（浏览器访问 http://EXTERNAL_HOST:18081）。
+  permission-nginx:
+    image: nginx:alpine
+    container_name: permission-nginx
+    ports:
+      - "${PERMISSION_NGINX_PORT:-18081}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - keycloak
+      - admin-console
+    networks:
+      - perm-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/realms/rag-v14/.well-known/openid-configuration"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
 # Secrets 默认从仓库内 permission-service/config/ 读取（该目录已在 .gitignore 中）。
 # 生产部署可通过 SECRETS_DIR 指向仓库外的挂载点，例如：

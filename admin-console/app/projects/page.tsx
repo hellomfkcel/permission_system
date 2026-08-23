@@ -52,7 +52,8 @@ export default function ProjectsPage() {
   const [members, setMembers] = useState<Member[]>([]);
   const [showAddMember, setShowAddMember] = useState(false);
   const [newMemberId, setNewMemberId] = useState("");
-  const [newMemberRole, setNewMemberRole] = useState("project_admin");
+  // 默认"只读"更安全：管理员会授予整个项目全部知识库的写/管理权限，需显式选择
+  const [newMemberRole, setNewMemberRole] = useState("project_viewer");
   const [availableUsers, setAvailableUsers] = useState<{user_id: string; username: string; display_name: string}[]>([]);
   const [userSearch, setUserSearch] = useState("");
 
@@ -442,6 +443,13 @@ export default function ProjectsPage() {
                       <button onClick={handleAddMember} disabled={!newMemberId} className="text-xs bg-green-600 text-white px-2 py-1 rounded disabled:opacity-40">添加</button>
                       <button onClick={() => { setShowAddMember(false); setUserSearch(""); setNewMemberId(""); }} className="text-xs bg-gray-200 px-2 py-1 rounded">取消</button>
                     </div>
+                    {newMemberRole === "project_admin" && (
+                      <div className="text-xs text-amber-800 bg-amber-50 border border-amber-300 rounded px-2 py-1.5">
+                        ⚠️ <b>管理员</b> 将授予该用户对整个项目 <b>全部知识库</b> 的
+                        管理/写入/授权权限（创建删除 KB、上传解析文档）。<br />
+                        若只需只读访问，请选择 <b>"只读"</b>。
+                      </div>
+                    )}
                     {userSearch && filteredUsers.length > 0 && (
                       <div className="max-h-32 overflow-y-auto border rounded bg-white">
                         {filteredUsers.map(u => (

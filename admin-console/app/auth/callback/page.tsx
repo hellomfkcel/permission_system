@@ -9,13 +9,14 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuthStore } from "@/stores/useAuthStore";
 
-const KEYCLOAK_URL = process.env.NEXT_PUBLIC_KEYCLOAK_URL || "http://192.168.1.127:8080";
+// Keycloak URL 由 build arg（deploy 注入）提供；不硬编码 IP
+const KEYCLOAK_URL = process.env.NEXT_PUBLIC_KEYCLOAK_URL || "";
 const KEYCLOAK_REALM = process.env.NEXT_PUBLIC_KEYCLOAK_REALM || "rag-v14";
 const KEYCLOAK_CLIENT_ID = process.env.NEXT_PUBLIC_KEYCLOAK_CLIENT_ID || "admin-console";
 const REDIRECT_URI =
   typeof window !== "undefined"
     ? `${window.location.origin}/auth/callback`
-    : "http://192.168.1.127:3002/auth/callback";
+    : "";
 
 export default function AuthCallbackPage() {
   const router = useRouter();
@@ -53,13 +54,16 @@ export default function AuthCallbackPage() {
 
       // 解析 JWT 获取用户信息
       const payload = JSON.parse(atob(accessToken.split(".")[1]));
+      // 身份首选 preferred_username（可读用户名），与权限服务 parse_principal 一致；
+      // Keycloak SSO 下 sub=UUID、preferred_username="admin" → principal user:admin
+      const userId = payload.preferred_username || payload.sub || "unknown";
       const user = {
-        user_id: payload.sub || "unknown",
+        user_id: userId,
         tenant_id: payload.tenant || payload.tenant_id || "",
         roles: payload.realm_access?.roles || [],
         groups: payload.groups || [],
         principals: [
-          `user:${payload.sub || "unknown"}`,
+          `user:${userId}`,
           ...(payload.groups || []).map((g: string) => `group:${g}`),
         ],
       };

@@ -22,7 +22,8 @@ interface SystemConfig {
 
 export default function SettingsPage() {
   const serviceUrl = process.env.NEXT_PUBLIC_PERMISSION_SERVICE_URL || "http://localhost:18080";
-  const keycloakUrl = process.env.NEXT_PUBLIC_KEYCLOAK_URL || "http://192.168.1.127:8080";
+  // Keycloak URL 由 build arg（deploy 注入，支持 https/域名）提供；不硬编码 IP
+  const keycloakUrl = process.env.NEXT_PUBLIC_KEYCLOAK_URL || "";
   const keycloakRealm = process.env.NEXT_PUBLIC_KEYCLOAK_REALM || "rag-v14";
 
   const [health, setHealth] = useState<HealthStatus>({

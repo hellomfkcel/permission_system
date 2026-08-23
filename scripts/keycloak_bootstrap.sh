@@ -107,22 +107,25 @@ else
         -s "webOrigins=[\"http://$EXTERNAL_HOST:3001\",\"http://$EXTERNAL_HOST\",\"https://$EXTERNAL_HOST:3001\",\"https://$EXTERNAL_HOST\",\"http://localhost:3001\",\"http://localhost\"]"
 fi
 
-# 3. admin-console（confidential，管理台 SSO）──
+# 3. admin-console（public，管理台 SSO）──
+# 浏览器 SPA 必须 public：前端回调直接向 Keycloak 换码、无法持有 client_secret。
+# 设 confidential 会令 token exchange 401 unauthorized_client（Invalid client credentials）。
 uuid=$(client_uuid admin-console)
 if [ -z "$uuid" ]; then
-    info "创建 client admin-console..."
+    info "创建 client admin-console（public）..."
     $KCADM create clients -r "$KC_REALM" \
         -s clientId=admin-console -s protocol=openid-connect \
-        -s publicClient=false -s standardFlowEnabled=true \
+        -s publicClient=true -s standardFlowEnabled=true \
         -s directAccessGrantsEnabled=false \
-        -s "redirectUris=[\"http://$EXTERNAL_HOST:3002/*\",\"https://$EXTERNAL_HOST:3002/*\",\"http://localhost:3002/*\",\"https://localhost:3002/*\"]" \
-        -s "webOrigins=[\"http://$EXTERNAL_HOST:3002\",\"https://$EXTERNAL_HOST:3002\",\"http://localhost:3002\",\"https://localhost:3002\"]"
+        -s "redirectUris=[\"http://$EXTERNAL_HOST:3002/*\",\"https://$EXTERNAL_HOST:3002/*\",\"http://$EXTERNAL_HOST:18081/*\",\"https://$EXTERNAL_HOST:18081/*\",\"http://localhost:3002/*\",\"https://localhost:3002/*\"]" \
+        -s "webOrigins=[\"http://$EXTERNAL_HOST:3002\",\"https://$EXTERNAL_HOST:3002\",\"http://$EXTERNAL_HOST:18081\",\"https://$EXTERNAL_HOST:18081\",\"http://localhost:3002\",\"https://localhost:3002\"]"
     uuid=$(client_uuid admin-console)
 else
-    ok "client admin-console 已存在（补齐 redirect/webOrigins）"
+    ok "client admin-console 已存在（补齐 publicClient/redirect/webOrigins）"
     $KCADM update "clients/$uuid" -r "$KC_REALM" \
-        -s "redirectUris=[\"http://$EXTERNAL_HOST:3002/*\",\"https://$EXTERNAL_HOST:3002/*\",\"http://localhost:3002/*\",\"https://localhost:3002/*\"]" \
-        -s "webOrigins=[\"http://$EXTERNAL_HOST:3002\",\"https://$EXTERNAL_HOST:3002\",\"http://localhost:3002\",\"https://localhost:3002\"]"
+        -s publicClient=true \
+        -s "redirectUris=[\"http://$EXTERNAL_HOST:3002/*\",\"https://$EXTERNAL_HOST:3002/*\",\"http://$EXTERNAL_HOST:18081/*\",\"https://$EXTERNAL_HOST:18081/*\",\"http://localhost:3002/*\",\"https://localhost:3002/*\"]" \
+        -s "webOrigins=[\"http://$EXTERNAL_HOST:3002\",\"https://$EXTERNAL_HOST:3002\",\"http://$EXTERNAL_HOST:18081\",\"https://$EXTERNAL_HOST:18081\",\"http://localhost:3002\",\"https://localhost:3002\"]"
 fi
 
 # 4. permission-service（confidential + service accounts + 写回 client secret）──
@@ -153,6 +156,19 @@ if [ -n "$_KC_SECRET" ]; then
     ok "permission-service client secret 已从 Keycloak 同步到配置文件"
 else
     info "未能读取 permission-service client secret（若 client 已存在且已有 secret，权限服务将用自身配置值）"
+fi
+
+# 授予 permission-service service account 的 realm-management 角色（用户同步/列表必需）。
+# 缺失时 /admin/realms/{realm}/users 返回 403 → 用户同步失败、admin-console 无法建用户/看用户。
+# 幂等：add-roles 重复授予无副作用。注：该 realm 无 view-groups 角色，只授存在的。
+info "授予 permission-service service account realm-management 角色（view-users/query-users/query-groups/view-realm）..."
+if $KCADM add-roles -r "$KC_REALM" \
+    --uusername service-account-permission-service \
+    --cclientid realm-management \
+    --rolename view-users --rolename query-users --rolename query-groups --rolename view-realm >/dev/null 2>&1; then
+    ok "service account 已授权 realm-management 角色（用户同步可用）"
+else
+    warn "授权 realm-management 角色失败——可稍后在 Keycloak 管理台手动授权（Users→permission-service service account→Role Mappings）"
 fi
 
 # 5. realm 角色 ────────────────────────────────────────────────────
