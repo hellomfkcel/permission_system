@@ -22,3 +22,6 @@ node_modules/
 **/config/tls_cert
 **/config/keycloak_admin_username
 **/config/keycloak_admin_password
+
+# 内部设计文档已移出 git（历史已清除，副本在 ~/docs_backup_20260824）
+docs/
