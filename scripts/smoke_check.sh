@@ -43,6 +43,12 @@ echo "══════ 权限系统 smoke 检查开始 ══════"
 code="$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:${PORT}/healthz" 2>/dev/null)"
 [ "$code" = "200" ] && ok "存活: permission-service /healthz → 200" || fail "存活: permission-service /healthz → ${code:-不可达}"
 
+# ── [1b] SSO 入口（permission-nginx :18081 /realms）可达 ────────
+NGINX_PORT="${PERMISSION_NGINX_PORT:-18081}"
+sso_code="$(curl -s -o /dev/null -w '%{http_code}' -m 5 \
+    "http://127.0.0.1:${NGINX_PORT}/realms/${KC_REALM}/.well-known/openid-configuration" 2>/dev/null)"
+[ "$sso_code" = "200" ] && ok "存活: SSO 入口 permission-nginx :${NGINX_PORT}/realms → 200" || fail "存活: SSO 入口 permission-nginx :${NGINX_PORT} → ${sso_code:-不可达}（登录跳转会不可访问；start.sh/deploy.sh 必须拉起 permission-nginx）"
+
 # ── [2] Keycloak master 登录 ────────────────────────────────────
 KC_PWD="$(cat permission-service/config/keycloak_admin_password 2>/dev/null || true)"
 KC_TOKEN=""

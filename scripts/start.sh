@@ -204,10 +204,13 @@ asyncio.run(_sync())
 \"" 2>&1 | tail -2
     ok "project_api_keys 已与当前 service_api_key 对齐"
 
-    # 7. 管理台前端
-    info "启动 admin-console..."
-    $COMPOSE up -d $build_flag admin-console
+    # 7. 管理台前端 + 独立入口 nginx（SSO 统一入口）
+    #     permission-nginx 必须一并拉起：它是 /realms 与 /admin 的 SSO 入口，
+    #     漏起会导致登录跳转 http://EXTERNAL_HOST:18081/realms/... 不可达（页面不可访问）。
+    info "启动 admin-console + permission-nginx..."
+    $COMPOSE up -d $build_flag admin-console permission-nginx
     wait_http "http://localhost:${ADMIN_CONSOLE_HOST_PORT:-3002}" "$APP_TIMEOUT" "admin-console(:3002)"
+    wait_http "http://localhost:${PERMISSION_NGINX_PORT:-18081}/realms/${KEYCLOAK_REALM:-rag-v14}/.well-known/openid-configuration" "$APP_TIMEOUT" "permission-nginx(:18081 SSO)"
 
     # 8. 部署后自检（smoke_check）
     info "运行 smoke 检查（scripts/smoke_check.sh）..."
