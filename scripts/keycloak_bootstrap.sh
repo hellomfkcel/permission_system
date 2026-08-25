@@ -26,6 +26,7 @@ cd "$REPO_ROOT"
 
 info() { echo -e "\033[36m[i]\033[0m $*"; }
 ok()   { echo -e "\033[32m[✓]\033[0m $*"; }
+warn() { echo -e "\033[33m[!]\033[0m $*"; }
 fail() { echo -e "\033[31m[x]\033[0m $*" >&2; exit 1; }
 
 # ── 参数解析 ─────────────────────────────────────────────────────
@@ -40,8 +41,6 @@ if [ -z "$KC_ADMIN_PASSWORD" ] && [ -f "permission-service/config/keycloak_admin
     KC_ADMIN_PASSWORD="$(cat permission-service/config/keycloak_admin_password)"
 fi
 [ -n "$KC_ADMIN_PASSWORD" ] || fail "缺 KEYCLOAK_ADMIN_PASSWORD（env 或 permission-service/config/keycloak_admin_password）"
-
-KC_CLIENT_SECRET="$(cat permission-service/config/keycloak_client_secret 2>/dev/null || true)"
 
 # ── kcadm 入口 ────────────────────────────────────────────────────
 command -v docker >/dev/null || fail "缺少 docker"
@@ -81,13 +80,24 @@ client_uuid() {
 }
 
 # 1. realm ─────────────────────────────────────────────────────────
+# sslRequired=none：HTTP-only 部署（TLS 由外部 LB 终结，本机不提供 https）。默认 external 会让
+# keycloak-js 适配器对非 localhost 客户端强制升级 https → http 部署下管理台/RAG 登录全挂。
+# 若将来 TLS 由本机 nginx 终结，再把这里改回 external/all。
 if ! $KCADM get "realms/$KC_REALM" >/dev/null 2>&1; then
     info "创建 realm $KC_REALM..."
-    $KCADM create realms -s realm="$KC_REALM" -s enabled=true -s registrationAllowed=false
-    ok "realm $KC_REALM 已创建"
+    $KCADM create realms -s realm="$KC_REALM" -s enabled=true -s registrationAllowed=false -s sslRequired=none
+    ok "realm $KC_REALM 已创建（sslRequired=none）"
 else
-    ok "realm $KC_REALM 已存在"
+    ok "realm $KC_REALM 已存在（按需补齐 sslRequired=none）"
+    $KCADM update "realms/$KC_REALM" -s sslRequired=none >/dev/null 2>&1 \
+        && ok "  sslRequired=none 已确认" \
+        || warn "  sslRequired=none 更新失败——管理台/RAG 登录可能仍强制 https"
 fi
+
+# 1b. master realm（admin 控制台所在）同样 sslRequired=none ──
+$KCADM update "realms/master" -s sslRequired=none >/dev/null 2>&1 \
+    && ok "master realm sslRequired=none（admin 控制台 http 可访问）" \
+    || warn "master realm sslRequired 更新失败——admin 控制台可能仍强制 https"
 
 # 2. rag-frontend（public，浏览器 SSO 登录，redirect 覆盖 :3001 直连 与 nginx :80 入口）──
 uuid=$(client_uuid rag-frontend)
@@ -181,6 +191,90 @@ for role in system_admin user; do
         ok "角色 $role 已存在"
     fi
 done
+
+# 5b. 默认角色：把 user 加入 default-roles-<realm>（RESET 后新用户自动获得 user 角色，
+#     否则授权链路静默断裂——新用户 JWT realm_access.roles 无 user，匹配不上任何授权）──
+if $KCADM get "roles/default-roles-$KC_REALM" -r "$KC_REALM" >/dev/null 2>&1; then
+    $KCADM add-roles -r "$KC_REALM" --rname "default-roles-$KC_REALM" --rolename user >/dev/null 2>&1 \
+        && ok "user 已加入 default-roles-$KC_REALM（新用户默认角色）" \
+        || warn "user 加入 default-roles 失败——新用户将拿不到 user 角色（可手工在管理台补）"
+else
+    warn "default-roles-$KC_REALM 不存在，跳过（可手工补 user 默认角色）"
+fi
+
+# 5c. realm 组（文档定义的 Engineering/Product/Admin；RESET 后可重建，组授权不静默失效）──
+# 用 admin REST API（每次现取 token）：kcadm get groups 在长流程中偶发空返回，REST 更稳。
+kc_admin_token() { # → master admin access token
+    curl -fsS -m 10 -X POST "http://127.0.0.1:${KEYCLOAK_HOST_PORT:-8080}/realms/master/protocol/openid-connect/token" \
+        -d "grant_type=password&client_id=admin-cli&username=${KC_ADMIN_USER}&password=${KC_ADMIN_PASSWORD}" 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null || true
+}
+ensure_group() { # $1=组名
+    local _t _gid _code
+    _t="$(kc_admin_token)"
+    [ -n "$_t" ] || { warn "组 $1：获取 admin token 失败"; return; }
+    _gid="$(curl -fsS -m 8 -H "Authorization: Bearer $_t" \
+        "http://127.0.0.1:${KEYCLOAK_HOST_PORT:-8080}/admin/realms/$KC_REALM/groups?search=$1&max=50" 2>/dev/null \
+        | python3 -c "import json,sys; print(next((g['id'] for g in json.load(sys.stdin) if g.get('name')=='$1'),''))" 2>/dev/null || true)"
+    if [ -n "$_gid" ]; then
+        ok "组 $1 已存在"
+    else
+        _code="$(curl -s -o /dev/null -w '%{http_code}' -m 8 -X POST -H "Authorization: Bearer $_t" \
+            -H "Content-Type: application/json" -d "{\"name\":\"$1\"}" \
+            "http://127.0.0.1:${KEYCLOAK_HOST_PORT:-8080}/admin/realms/$KC_REALM/groups" 2>/dev/null)"
+        case "$_code" in
+            201) ok "组 $1 已创建" ;;
+            409) ok "组 $1 已存在（创建返回冲突）" ;;
+            *)   warn "组 $1 创建失败（HTTP $_code）" ;;
+        esac
+    fi
+}
+for _g in Engineering Product Admin; do ensure_group "$_g"; done
+
+# 5d. 初始业务账号 seed（幂等；口令仅在创建时写入，不覆盖运行期已改口令）──
+# 清单来自 permission-service/config/keycloak_seed_users（deploy 生成，运维可编辑）：
+#   每行 username|password|realm_roles(逗号)|tenant_id；# 开头为注释；password 为空则跳过设口令。
+user_uuid() { # $1=username → 内部 UUID
+    $KCADM get users -r "$KC_REALM" -q username="$1" --format csv --fields id 2>/dev/null | tail -1 | tr -d '"'
+}
+ensure_user() { # $1=username $2=password $3=realm_roles $4=tenant_id
+    local _u="$1" _pwd="$2" _roles="$3" _tid="$4" _uid
+    _uid="$(user_uuid "$_u")"
+    if [ -z "$_uid" ]; then
+        info "创建用户 $_u..."
+        $KCADM create users -r "$KC_REALM" -s username="$_u" -s enabled=true >/dev/null 2>&1
+        _uid="$(user_uuid "$_u")"
+        if [ -n "$_pwd" ] && [ -n "$_uid" ]; then
+            $KCADM set-password -r "$KC_REALM" --username "$_u" --new-password "$_pwd" >/dev/null 2>&1 \
+                && ok "  $_u 已创建并设口令" \
+                || warn "  $_u 创建成功但设口令失败"
+        elif [ -n "$_uid" ]; then
+            warn "  $_u 已创建但 seed 未提供口令（跳过 set-password，需在管理台设初始口令）"
+        fi
+    else
+        ok "用户 $_u 已存在（不覆盖口令）"
+    fi
+    if [ -n "$_uid" ] && [ -n "$_roles" ]; then
+        for _r in ${_roles//,/ }; do
+            $KCADM add-roles -r "$KC_REALM" --uusername "$_u" --rolename "$_r" >/dev/null 2>&1 || true
+        done
+        ok "  $_u 角色已确保: $_roles"
+    fi
+    if [ -n "$_uid" ] && [ -n "$_tid" ]; then
+        $KCADM update "users/$_uid" -r "$KC_REALM" -s "attributes.tenant_id=[\"$_tid\"]" >/dev/null 2>&1 \
+            && ok "  $_u tenant_id 已确保" \
+            || warn "  $_u tenant_id 设置失败"
+    fi
+}
+if [ -f "permission-service/config/keycloak_seed_users" ]; then
+    while IFS='|' read -r _su _sp _sr _st; do
+        [ -z "$_su" ] && continue
+        [[ "$_su" == \#* ]] && continue
+        ensure_user "$_su" "$_sp" "$_sr" "$_st" </dev/null
+    done < "permission-service/config/keycloak_seed_users"
+else
+    warn "缺 permission-service/config/keycloak_seed_users——初始业务账号未 seed（deploy 会自动生成）"
+fi
 
 # 6. client mappers（tenant / groups → rag-frontend + admin-console）──
 mapper_exists() { # $1=client_uuid $2=mapper_name

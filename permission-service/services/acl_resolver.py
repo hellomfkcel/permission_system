@@ -458,9 +458,11 @@ async def get_active_kbs_for_principal(
     # 与决策路径一致（resolve_bound_roles 已按角色绑定授予）；prefilter 之前漏了此源，
     # 导致只有角色绑定（如 user:admin→platform_admin_role 全资源）无 KB ACL 的超级管理员
     # 返回 kbs:[] → 检索预过滤 0 结果。
+    # 角色绑定不做租户过滤（与决策路径 _applicable_bindings 一致）：角色绑定跨租户生效。
+    # 否则超管/平台角色绑定（seed 里 tenant_id=tenant-dev）在其它租户被排除 → 同一超管
+    # 能写（check 通过）不能读（无可见性戳）→ 检索预过滤 0 结果。
     rb_conditions = [
         RoleBinding.principal.in_(principals),
-        RoleBinding.tenant_id == tenant_id,
         RoleBinding.revoked == False,  # noqa: E712
         or_(
             RoleBinding.resource_type.is_(None),
@@ -578,9 +580,11 @@ async def get_allow_stamps_for_channel(
     # 角色绑定表示该 principal 持有某角色，戳记须与 JWT principals 中的形式一致。
     # 项目过滤须包含 project_id IS NULL 的全局/平台绑定（如 user:admin→platform_admin_role
     # project_id=NULL）：否则平台管理员角色绑定的主体不会出现在可见性戳里 → 检索预过滤 0 结果。
+    # 角色绑定不做租户过滤（与决策路径 _applicable_bindings 一致）：超管/平台级绑定的主体
+    # 应在任意租户获得可见性戳。否则写/读判定不一致——能写（check 通过）不能读
+    # （盖空戳 allow_stamps=[]）→ 检索预过滤 0 结果。
     role_conditions = [
         RoleBinding.revoked == False,  # noqa: E712
-        RoleBinding.tenant_id == tenant_id,
         or_(
             RoleBinding.resource_id.is_(None),
             RoleBinding.resource_id == kb_id,

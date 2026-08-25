@@ -13,6 +13,7 @@
 #   scripts/start.sh init-secrets    # 校验/生成 secret 文件（幂等）
 #
 #   BUILD=1 scripts/start.sh start   # 强制重建镜像（代码有变更时）；默认 BUILD=0 复用已有镜像秒起
+#   RESET=1 scripts/start.sh start   # 全新部署：先清空全部数据卷（数据不可恢复）
 #
 # ── 快速开始：首次启动 ─────────────────────────────────────────────
 # 1) cp .env.example .env，填写 POSTGRES_PASSWORD / PERM_REDIS_PASSWORD / EXTERNAL_HOST 等必需变量
@@ -42,6 +43,7 @@ COMPOSE="docker compose -f docker-compose.yml"
 INFRA_TIMEOUT="${INFRA_TIMEOUT:-180}"   # 基础设施健康等待上限（秒）
 APP_TIMEOUT="${APP_TIMEOUT:-180}"       # 应用就绪等待上限（秒）
 BUILD="${BUILD:-0}"                     # 1=强制重建镜像，0=复用已有镜像（默认）
+RESET="${RESET:-0}"                     # 1=全新部署：先清空全部数据卷（down -v，数据不可恢复）
 
 info() { echo -e "\033[36m[i]\033[0m $*"; }
 ok()   { echo -e "\033[32m[✓]\033[0m $*"; }
@@ -51,21 +53,26 @@ fail() { echo -e "\033[31m[x]\033[0m $*" >&2; exit 1; }
 # ── 等待全部服务 healthy ─────────────────────────────────────────
 wait_healthy() {
     local compose_cmd="$1" timeout="$2" label="$3"
+    shift 3
+    local wanted="$*"   # 可选：只等指定服务；空则等全部
     local waited=0 bad=""
     info "等待 $label 全部就绪（上限 ${timeout}s）..."
     while (( waited < timeout )); do
         bad="$(eval "$compose_cmd ps --format json 2>/dev/null" | python3 -c "
 import json,sys
+wanted=set('''$wanted'''.split())
 bad=[]
 for line in sys.stdin:
     line=line.strip()
     if not line: continue
     r=json.loads(line)
+    name=(r.get('Service') or r.get('Name') or '?')
+    if wanted and name not in wanted: continue
     h=(r.get('Health') or '').lower()
     s=(r.get('State') or '').lower()
     if s=='running' and (h=='healthy' or h==''):
         continue
-    bad.append(r.get('Service') or r.get('Name') or '?')
+    bad.append(name)
 print(' '.join(bad))
 " || echo "UNPARSE")"
         if [[ -z "$bad" ]]; then
@@ -116,27 +123,99 @@ cmd_start() {
     local build_flag=""
     [[ "$BUILD" == "1" ]] && build_flag="--build"
 
+    # RESET=1：全新部署，先清空全部数据卷（数据不可恢复）
+    if [[ "$RESET" == "1" ]]; then
+        warn "RESET=1 全新部署：即将清空全部数据卷（perm_pgdata / keycloak_data / perm_redis_data / perm_cerbos_audit），数据不可恢复！"
+        $COMPOSE down -v --remove-orphans
+        ok "数据卷已清空，将按当前 .env 全新初始化"
+    fi
+
     # 1. secrets 校验/生成
     cmd_init_secrets
 
-    # 2. 基础设施 + Keycloak IdP（同一 compose，内部按 depends_on healthy 排序）
-    info "启动基础设施（perm-postgres / perm-redis / cerbos）+ Keycloak..."
-    $COMPOSE up -d $build_flag perm-postgres perm-redis cerbos keycloak
-    wait_healthy "$COMPOSE" "$INFRA_TIMEOUT" "基础设施 + Keycloak"
+    # 2. 读取 .env（口令预检需要 POSTGRES_PASSWORD / KC_START_MODE；compose 仍自行读 .env）
+    set -a; [ -f .env ] && source .env; set +a
 
-    # 3. 数据库迁移（先于服务启动）
+    # 3. 基础设施（postgres/redis/cerbos 先起；Keycloak 拆后，因需在起它前做口令预检）
+    info "启动 postgres/redis/cerbos..."
+    $COMPOSE up -d $build_flag perm-postgres perm-redis cerbos
+    wait_healthy "$COMPOSE" "$INFRA_TIMEOUT" "postgres/redis/cerbos" perm-postgres perm-redis cerbos
+
+    # 口令预检（fail-fast）：既有 perm_pgdata 卷口令固化，POSTGRES_PASSWORD 对非空卷不生效；
+    # 用容器内 @perm-postgres:5432 命中真实 scram 认证，在起 Keycloak 前暴露漂移。
+    if [ "${KC_START_MODE:-start-dev}" = "start" ]; then
+        if $COMPOSE exec -T perm-postgres psql \
+            "postgresql://${POSTGRES_USER:-perm_user}:${POSTGRES_PASSWORD}@perm-postgres:5432/permission_db" \
+            -tAc "SELECT 1" >/dev/null 2>&1; then
+            ok "perm-postgres 口令预检通过（${POSTGRES_USER:-perm_user}）"
+        else
+            fail "perm-postgres 数据卷口令与 .env 不一致（perm_user 认证失败）。\n    处理：RESET=1 scripts/start.sh start 全量重建（清空数据卷，数据不可恢复）；\n          或恢复该卷首次初始化时的原 POSTGRES_PASSWORD 到 .env。"
+        fi
+        # 确保 keycloak 数据库存在（须在 Keycloak 启动前，否则全新空卷起不来）
+        info "确保 perm-postgres 中 keycloak 数据库存在..."
+        $COMPOSE exec -T perm-postgres psql -U perm_user -d permission_db -tAc \
+            "SELECT 1 FROM pg_database WHERE datname='keycloak'" 2>/dev/null | grep -q 1 \
+            || $COMPOSE exec -T perm-postgres psql -U perm_user -d permission_db -c "CREATE DATABASE keycloak" 2>&1 | tail -1
+        ok "keycloak 数据库就绪（perm-postgres/keycloak）"
+    fi
+
+    # 4. Keycloak IdP
+    info "启动 Keycloak..."
+    $COMPOSE up -d $build_flag keycloak
+    wait_healthy "$COMPOSE" "$INFRA_TIMEOUT" "Keycloak" keycloak
+
+    # 4b. Keycloak realm/client/roles/用户 幂等 bootstrap（自愈 realm；RESET=1 后也能重建，与 deploy 等价）。
+    #     若 bootstrap 写回 keycloak_client_secret 且值变化 → 后续强制重建 permission-service 刷新 secret 快照。
+    _cs_before="$(cat permission-service/config/keycloak_client_secret 2>/dev/null | sha256sum | awk '{print $1}')"
+    bash scripts/keycloak_bootstrap.sh || warn "keycloak_bootstrap 失败——realm 可能不完整，请查日志"
+    _cs_after="$(cat permission-service/config/keycloak_client_secret 2>/dev/null | sha256sum | awk '{print $1}')"
+    RECREATE_PERM="0"
+    if [ -n "$_cs_before" ] && [ -n "$_cs_after" ] && [ "$_cs_before" != "$_cs_after" ]; then
+        RECREATE_PERM="1"
+        info "keycloak client secret 已变化——permission-service 将强制重建刷新 secret 快照"
+    fi
+
+    # 5. 数据库迁移（先于服务启动）
     cmd_migrate
 
-    # 4. 权限服务后端（depends_on keycloak healthy）
+    # 6. 权限服务后端（depends_on keycloak healthy）
+    local rec_flag=""; [ "$RECREATE_PERM" = "1" ] && rec_flag="--force-recreate"
     info "启动 permission-service..."
-    $COMPOSE up -d $build_flag permission-service
+    $COMPOSE up -d $build_flag $rec_flag permission-service
     wait_healthy "$COMPOSE" "$INFRA_TIMEOUT" "permission-service"
     wait_http "http://localhost:${PERMISSION_SERVICE_HOST_PORT:-18080}/healthz" "$APP_TIMEOUT" "permission-service(/healthz)"
 
-    # 5. 管理台前端
+    # 6b. project_api_keys key_hash 与当前 service_api_key 对齐（与 deploy.sh 一致，防 start.sh 路径分叉）
+    info "对齐 project_api_keys 与当前 service_api_key..."
+    NEWKEY_HASH="$(tr -d '\n\r' < permission-service/config/service_api_key | sha256sum | awk '{print $1}')"
+    docker exec permission-service sh -c "python3 -c \"
+import asyncio
+from app.database import async_session
+from sqlalchemy import text
+async def _sync():
+    async with async_session() as s:
+        rows = await s.execute(text(\\\"SELECT project_id, key_hash FROM project_api_keys\\\"))
+        for r in rows:
+            if r.key_hash != '$NEWKEY_HASH':
+                await s.execute(text(\\\"UPDATE project_api_keys SET key_hash='$NEWKEY_HASH' WHERE project_id=:p\\\").bindparams(p=r.project_id))
+                print('synced project_api_keys:', r.project_id, '->', '$NEWKEY_HASH'[:12])
+        await s.commit()
+asyncio.run(_sync())
+\"" 2>&1 | tail -2
+    ok "project_api_keys 已与当前 service_api_key 对齐"
+
+    # 7. 管理台前端
     info "启动 admin-console..."
     $COMPOSE up -d $build_flag admin-console
     wait_http "http://localhost:${ADMIN_CONSOLE_HOST_PORT:-3002}" "$APP_TIMEOUT" "admin-console(:3002)"
+
+    # 8. 部署后自检（smoke_check）
+    info "运行 smoke 检查（scripts/smoke_check.sh）..."
+    if bash scripts/smoke_check.sh; then
+        ok "smoke 检查全部通过"
+    else
+        warn "smoke 检查存在失败项——请按上方 [x] 提示修复后重跑：bash scripts/smoke_check.sh"
+    fi
 
     echo ""
     echo "══════ 外部权限系统已启动 ══════"

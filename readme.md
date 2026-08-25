@@ -184,11 +184,18 @@ docker-compose*.yml     编排
 ```bash
 KC_START_MODE=start bash scripts/deploy.sh    # 生产（外部 postgres + realm 自动导入）
 BUILD=1 bash scripts/deploy.sh                # 强制重建镜像
+RESET=1 bash scripts/deploy.sh                # 全新部署：清空全部数据卷（数据不可恢复）
 ```
 
 `deploy.sh`：生成强口令/密钥 → `init_secrets`（9 个 secret，含从 RAG 同步 JWT 密钥）→
 起基础设施 + Keycloak → **kcadm 幂等导入 realm/client/roles/mappers** → alembic 迁移 →
 起 permission-service + admin-console + **permission-nginx**（独立入口）。
+
+**全新部署（RESET=1）**：数据卷（`perm_pgdata`/`keycloak_data`/`perm_redis_data`/`perm_cerbos_audit`）
+的口令与数据在首次初始化时固化，`POSTGRES_PASSWORD` 等对既有卷不生效。若重部署时 `.env` 口令与旧卷
+不一致，Keycloak 会报 `password authentication failed`——脚本会在起 Keycloak 前做口令预检并给出提示。
+`RESET=1` 清空全部数据卷后按 `.env` 全新初始化（**数据不可恢复**）。
+全新部署后，必须要手动在keycloak上重建相关项目的账户
 
 **访问入口**：
 | 入口 | 地址 |
@@ -200,9 +207,6 @@ BUILD=1 bash scripts/deploy.sh                # 强制重建镜像
 ### 初始账号
 
 | 账号 | 密码 | 角色 | 说明 |
-|------|------|------|------|
-| `admin` | `Admin@44545780` | `system_admin` | 权限平台 + RAG 超管（rag-v14 realm 业务账号） |
-| `testuser` | `testpass123456` | `user` | 普通只读，联调/演示用 |
 | Keycloak master | `admin` | master 管理员 | 口令在 `permission-service/config/keycloak_admin_password` |
 
 ### 新用户创建
@@ -214,3 +218,29 @@ BUILD=1 bash scripts/deploy.sh                # 强制重建镜像
 
 > ⚠️ 项目管理员会授予项目内全部知识库写/管理权限，给 RAG 只读用户请用角色绑定，勿用项目管理员。
 > 详细：`docs/ops/权限系统上线运维手册.md` §2.2 与 §9（部署问题实录）。
+
+### 部署自检与 RESET 可复现
+
+- **部署后自检**：`deploy.sh` / `start.sh` 末尾自动运行 `scripts/smoke_check.sh`（服务存活、Keycloak 登录、
+  realm `ssl-required=none`、业务账号存在、X-Api-Key 认证、共享密钥对账）。失败项标 `[x]`，按提示修复后重跑
+  `bash scripts/smoke_check.sh`。
+- **RESET 后可复现**：`RESET=1` 清空数据卷后，`keycloak_bootstrap.sh` 会按 `permission-service/config/keycloak_seed_users`
+  **幂等重建业务账号**（默认 `admin`/`Admin@44545780` + `testuser`；口令只在创建时写入，不覆盖运行期改动），
+  并把 `user` 加回默认角色、重建 `Engineering`/`Product`/`Admin` 组。`start.sh` 每次启动也会跑 bootstrap 自愈 realm。
+  seed 文件在 `permission-service/config/keycloak_seed_users`（`用户名|口令|角色|tenant_id`），可编辑改口令。
+
+### 共享密钥轮换（两步走，勿只做一半）
+
+`service_api_key` / `ctx_token_secret` 同时存在权限文件、权限 DB/容器、RAG `.env` 三处。轮换需按序收敛，否则
+中间状态 RAG 调用权限会 401（fail-closed）：
+
+1. 权限侧：删 `permission-service/config/service_api_key`（或 `ctx_token_secret`）→ 重跑 `deploy.sh`
+   （`init_secrets` 重新生成 → DB key_hash 同步 → smoke_check 会校验文件==DB==RAG .env）。
+2. RAG 侧：重跑 `proj_rag_dev/scripts/deploy.sh`（从权限侧重读共享值写回 `.env`）。
+3. `bash scripts/smoke_check.sh` 应全绿。任一步漏了，smoke 会明确报出哪一侧失配。
+   JWT 密钥对轮换同理：`ROTATE_KEYS=1` 重跑 RAG deploy 后，**必须**再跑一次权限 deploy 同步公钥。
+   `keycloak_client_secret` 由 `keycloak_bootstrap.sh` 以 Keycloak 为权威回写；若变化，`start.sh`/`deploy.sh`
+   会自动 `--force-recreate permission-service` 刷新容器快照。
+
+> 备份：`bash scripts/backup.sh` 现已包含 `permission-service/config/`（`keycloak_admin_password`、
+> `service_api_key`、`keycloak_seed_users` 等不可再生文件），恢复 RESET 后必备。

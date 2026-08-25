@@ -12,6 +12,7 @@
 #   bash scripts/deploy.sh                 # 生产部署（默认 PRODUCTION=true）
 #   PRODUCTION=0 bash scripts/deploy.sh    # 本地/联调（跳过强凭据强制）
 #   BUILD=1 bash scripts/deploy.sh         # 强制重建镜像
+#   RESET=1 bash scripts/deploy.sh         # 全新部署：先清空全部数据卷（数据不可恢复）
 #
 # 人工设置值（第 4 步，缺失会 fail）：
 #   EXTERNAL_HOST        浏览器访问管理台/Keycloak 的地址（域名或公网 IP）。
@@ -28,11 +29,11 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 COMPOSE="docker compose"
-INFRA_SERVICES="perm-postgres perm-redis cerbos keycloak"
 APP_SERVICES="permission-service admin-console permission-nginx"
 INFRA_TIMEOUT="${INFRA_TIMEOUT:-180}"
 APP_TIMEOUT="${APP_TIMEOUT:-120}"
 BUILD="${BUILD:-0}"
+RESET="${RESET:-0}"    # 1=全新部署：先清空全部数据卷（down -v），数据不可恢复
 # 部署意图：shell 显式设置（PRODUCTION=0 关 / PRODUCTION=true 开）优先，默认 true（生产）。
 # .env 里的旧 PRODUCTION=false 是仓库开发默认，会被下方「生产强制」块覆盖，不在此覆盖部署意图。
 PRODUCTION_INTENT="${PRODUCTION:-true}"
@@ -64,6 +65,15 @@ command -v openssl >/dev/null || fail "缺少 openssl"
 set -a; source "$ENV_FILE"; set +a
 # .env 的旧 PRODUCTION=false 不覆盖部署意图（PRODUCTION=true 默认）
 PRODUCTION="$PRODUCTION_INTENT"; export PRODUCTION
+
+# ── RESET=1：全新部署（清空全部数据卷，数据不可恢复） ──
+# 既有 perm_pgdata/keycloak_data 等卷的口令/数据在首次初始化时固化（POSTGRES_PASSWORD 对非空卷不生效）；
+# RESET 清空后 postgres/keycloak 按当前 .env 全新初始化，全链路口令一致。
+if [ "$RESET" = "1" ]; then
+    warn "RESET=1 全新部署：即将清空全部数据卷（perm_pgdata / keycloak_data / perm_redis_data / perm_cerbos_audit），数据不可恢复！"
+    $COMPOSE down -v --remove-orphans
+    ok "数据卷已清空，将按当前 .env 全新初始化"
+fi
 
 # ── 第 4 步：人工值 ──
 # EXTERNAL_HOST：浏览器可达地址
@@ -98,6 +108,19 @@ fi
 mkdir -p permission-service/config
 umask 077
 printf '%s' "$KC_ADMIN_PASSWORD" > permission-service/config/keycloak_admin_password
+
+# ── Keycloak 初始业务账号 seed（幂等；RESET 后 keycloak_bootstrap 按此重建）──
+# 每行 username|password|realm_roles(逗号)|tenant_id；运维可编辑改口令。
+# 只在文件缺失时生成默认（admin/testuser），不覆盖运维后续编辑。
+if [ ! -f permission-service/config/keycloak_seed_users ]; then
+    cat > permission-service/config/keycloak_seed_users <<'EOF'
+# username|password|realm_roles|tenant_id
+admin|Admin@44545780|system_admin|
+testuser|testpass123456|user|
+EOF
+    chmod 600 permission-service/config/keycloak_seed_users
+    ok "已生成 keycloak_seed_users（初始业务账号 admin/testuser，可编辑改口令）"
+fi
 
 # ── 第 2 步：自动生成强口令（仅缺失时） ──
 gen_env_if_missing() { # key [hex_length]
@@ -190,30 +213,64 @@ update_env NEXT_PUBLIC_PERMISSION_SERVICE_URL "${NEXT_PUBLIC_PERMISSION_SERVICE_
 # 来源是 http://EXTERNAL_HOST:3002（非 https）。可 env 覆盖。
 update_env ALLOWED_ORIGINS "${ALLOWED_ORIGINS:-http://${EXTERNAL_HOST}:${PERMISSION_NGINX_PORT:-18081},http://localhost:3002}"
 
-# ── 4. 起基础设施 + Keycloak，等待 healthy ───────────────────────
-info "启动基础设施 + Keycloak（$INFRA_SERVICES）..."
-$COMPOSE up -d $INFRA_SERVICES
-# 等待全部 healthy
-local_waited=0
-while (( local_waited < INFRA_TIMEOUT )); do
-    bad="$($COMPOSE ps --format json 2>/dev/null | python3 -c "
+# ── 4. 起基础设施（拆两段）+ Keycloak，等待 healthy ───────────────
+wait_services() { # label timeout [svc...]  —— 仅等指定服务；不传则等全部
+    local label="$1" timeout="$2"; shift 2
+    local wanted="$*"
+    local waited=0 bad=""
+    info "等待 $label 就绪（上限 ${timeout}s）..."
+    while (( waited < timeout )); do
+        bad="$($COMPOSE ps --format json 2>/dev/null | python3 -c "
 import json,sys
+wanted=set('''$wanted'''.split())
 bad=[]
 for line in sys.stdin:
     line=line.strip()
     if not line: continue
     r=json.loads(line)
+    name=(r.get('Service') or r.get('Name') or '?')
+    if wanted and name not in wanted: continue
     h=(r.get('Health') or '').lower(); s=(r.get('State') or '').lower()
     if s=='running' and (h=='healthy' or h==''): continue
-    bad.append(r.get('Service') or r.get('Name') or '?')
+    bad.append(name)
 print(' '.join(bad))
 " || echo UNPARSE)"
-    if [ -z "$bad" ]; then ok "基础设施全部就绪"; break; fi
-    sleep 3; local_waited=$((local_waited+3))
-done
-if (( local_waited >= INFRA_TIMEOUT )); then
-    $COMPOSE ps; fail "基础设施启动超时（${INFRA_TIMEOUT}s）：$bad"
+        if [ -z "$bad" ]; then ok "$label 就绪"; return 0; fi
+        sleep 3; waited=$((waited+3))
+    done
+    $COMPOSE ps; fail "$label 启动超时（${timeout}s）：$bad"
+}
+
+info "启动 postgres/redis/cerbos..."
+$COMPOSE up -d perm-postgres perm-redis cerbos
+wait_services "postgres/redis/cerbos" "$INFRA_TIMEOUT" perm-postgres perm-redis cerbos
+
+# ── Keycloak 外部库口令预检（fail-fast）────────────────────────────
+# 既有 perm_pgdata 卷的口令在首次初始化时固化，POSTGRES_PASSWORD 对非空卷不生效。
+# 用容器内 @perm-postgres:5432 连接命中真实 scram 认证（loopback 是 trust 测不出口令），
+# 在起 Keycloak 之前暴露口令漂移，避免 Keycloak 崩溃循环 + Hibernate 堆栈。
+if [ "$KC_START_MODE" = "start" ]; then
+    if $COMPOSE exec -T perm-postgres psql \
+        "postgresql://${POSTGRES_USER:-perm_user}:${POSTGRES_PASSWORD}@perm-postgres:5432/permission_db" \
+        -tAc "SELECT 1" >/dev/null 2>&1; then
+        ok "perm-postgres 口令预检通过（${POSTGRES_USER:-perm_user}）"
+    else
+        fail "perm-postgres 数据卷口令与 .env 不一致（perm_user 认证失败）。\n    原因：既有 perm_pgdata 卷以旧口令初始化，POSTGRES_PASSWORD 对非空卷不生效。\n    处理：RESET=1 bash scripts/deploy.sh 全量重建（清空数据卷，数据不可恢复）；\n          或恢复该卷首次初始化时的原 POSTGRES_PASSWORD 到 .env。"
+    fi
 fi
+
+# ── 确保 keycloak 数据库存在（须在 Keycloak 启动前，否则全新空卷起不来） ──
+if [ "$KC_START_MODE" = "start" ]; then
+    info "确保 perm-postgres 中 keycloak 数据库存在..."
+    $COMPOSE exec -T perm-postgres psql -U perm_user -d permission_db -tAc \
+        "SELECT 1 FROM pg_database WHERE datname='keycloak'" 2>/dev/null | grep -q 1 \
+        || $COMPOSE exec -T perm-postgres psql -U perm_user -d permission_db -c "CREATE DATABASE keycloak" 2>&1 | tail -1
+    ok "keycloak 数据库就绪（perm-postgres/keycloak）"
+fi
+
+info "启动 Keycloak..."
+$COMPOSE up -d keycloak
+wait_services "Keycloak" "$INFRA_TIMEOUT" keycloak
 
 # 硬校验：keycloak 容器实际口令必须与 secret 一致（防 env 未透传导致弱口令 admin123 固化）
 _KCN="$(docker exec perm-keycloak sh -c 'printf "%s" "$KEYCLOAK_ADMIN_PASSWORD"' 2>/dev/null || true)"
@@ -221,15 +278,6 @@ if [ -n "$_KCN" ] && [ "$_KCN" != "$KC_ADMIN_PASSWORD" ]; then
     fail "keycloak 容器口令与 secret 不一致（容器 ${#_KCN} 字符 vs secret ${#KC_ADMIN_PASSWORD} 字符）。\n    KEYCLOAK_ADMIN_PASSWORD 未正确注入 compose——请修复后删除 keycloak 数据卷重新部署。"
 fi
 ok "keycloak 口令已注入（与 secret 一致）"
-
-# ── 5. Keycloak 生产模式：确保 keycloak 数据库存在（perm-postgres） ──
-if [ "$KC_START_MODE" = "start" ]; then
-    info "确保 perm-postgres 中 keycloak 数据库存在..."
-    docker compose exec -T perm-postgres psql -U perm_user -d permission_db -tAc \
-        "SELECT 1 FROM pg_database WHERE datname='keycloak'" 2>/dev/null | grep -q 1 \
-        || docker compose exec -T perm-postgres psql -U perm_user -d permission_db -c "CREATE DATABASE keycloak" 2>&1 | tail -1
-    ok "keycloak 数据库就绪（perm-postgres/keycloak）"
-fi
 
 # ── 6. Keycloak realm/client/roles/mappers 幂等导入 ───────────────
 info "Keycloak realm/client 自动导入（kcadm）..."
@@ -283,6 +331,14 @@ async def _sync():
 asyncio.run(_sync())
 \"" 2>&1 | tail -2
 ok "project_api_keys 已与当前 service_api_key 对齐"
+
+# ── 部署后自检（smoke_check）：验证"起来"≠"可用" ──
+info "运行部署后 smoke 检查（scripts/smoke_check.sh）..."
+if bash scripts/smoke_check.sh; then
+    ok "smoke 检查全部通过"
+else
+    warn "smoke 检查存在失败项——请按上方 [x] 提示修复后重跑：bash scripts/smoke_check.sh"
+fi
 
 echo ""
 echo "══════ 权限系统已部署 ══════"

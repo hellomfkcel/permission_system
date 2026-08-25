@@ -5,8 +5,10 @@
 # 产物：backups/YYYYMMDD-HHMMSS/ 下
 #   - perm-pg.sql           权限库 PostgreSQL 逻辑备份（ACL/角色/项目）
 #   - perm-redis.tar.gz     perm-redis 卷快照（事件流/任务）
-#   - keycloak-realm.json   Keycloak realm 导出（rag-v14 完整配置 + 用户）
+#   - keycloak.tar.gz       Keycloak 卷快照（realm 配置 + 用户；KC24 kcadm 已移除 export，用卷快照）
 #   - cerbos-audit.tar.gz   Cerbos 审计卷快照（判定审计，见保留期说明）
+#   - perm-config.tar.gz    权限服务配置/secret 目录（keycloak_admin_password 等不可再生文件，
+#                            含 keycloak_seed_users——RESET 后重建业务账号的依据）
 #
 # 用法（仓库根目录执行）：
 #   bash scripts/backup.sh [保留份数=7]
@@ -68,6 +70,18 @@ if docker run --rm -v permission-system_perm_cerbos_audit:/data -v "$DEST":/back
     ok "cerbos-audit.tar.gz"
 else
     warn "Cerbos 审计卷快照失败"
+fi
+
+# 4.5 配置/secret 目录（keycloak_admin_password 等不可再生文件；全系统唯一恢复阻塞点的兜底）
+info "配置/secret 备份（permission-service/config/）..."
+if [ -d permission-service/config ] && [ -n "$(ls -A permission-service/config 2>/dev/null)" ]; then
+    if tar czf "$DEST/perm-config.tar.gz" -C "$REPO_ROOT" permission-service/config 2>/dev/null; then
+        ok "perm-config.tar.gz（含 keycloak_admin_password / service_api_key / ctx_token_secret / keycloak_seed_users 等）"
+    else
+        warn "perm-config.tar.gz 打包失败"
+    fi
+else
+    warn "permission-service/config 为空或不存在，跳过配置备份"
 fi
 
 # 5. 保留轮转
