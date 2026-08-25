@@ -32,6 +32,9 @@ fail() { echo -e "\033[31m[x]\033[0m $*" >&2; exit 1; }
 # ── 参数解析 ─────────────────────────────────────────────────────
 set -a; [ -f .env ] && source .env; set +a
 EXTERNAL_HOST="${EXTERNAL_HOST:-localhost}"
+# RAG 外网入口端口（frp 隧道把 云:18080 → 本地 RAG nginx :80）。浏览器访问 RAG 的 origin 是
+# http://EXTERNAL_HOST:18080，Keycloak redirect_uri 必须包含该端口，否则登录报 Invalid redirect_uri。
+RAG_ENTRY_PORT="${RAG_ENTRY_PORT:-18080}"
 KC_SERVER="${KC_SERVER:-http://localhost:8080}"
 KC_REALM="${KEYCLOAK_REALM:-rag-v14}"
 KC_ADMIN_USER="${KEYCLOAK_ADMIN_USERNAME:-admin}"
@@ -107,14 +110,14 @@ if [ -z "$uuid" ]; then
         -s clientId=rag-frontend -s protocol=openid-connect \
         -s publicClient=true -s standardFlowEnabled=true \
         -s directAccessGrantsEnabled=false \
-        -s "redirectUris=[\"http://$EXTERNAL_HOST:3001/*\",\"http://$EXTERNAL_HOST/*\",\"https://$EXTERNAL_HOST:3001/*\",\"https://$EXTERNAL_HOST/*\",\"http://localhost:3001/*\",\"http://localhost/*\",\"https://localhost:3001/*\",\"https://localhost/*\"]" \
-        -s "webOrigins=[\"http://$EXTERNAL_HOST:3001\",\"http://$EXTERNAL_HOST\",\"https://$EXTERNAL_HOST:3001\",\"https://$EXTERNAL_HOST\",\"http://localhost:3001\",\"http://localhost\"]"
+        -s "redirectUris=[\"http://$EXTERNAL_HOST:${RAG_ENTRY_PORT}/*\",\"http://$EXTERNAL_HOST:3001/*\",\"http://$EXTERNAL_HOST/*\",\"https://$EXTERNAL_HOST:${RAG_ENTRY_PORT}/*\",\"https://$EXTERNAL_HOST:3001/*\",\"https://$EXTERNAL_HOST/*\",\"http://localhost:3001/*\",\"http://localhost/*\",\"https://localhost:3001/*\",\"https://localhost/*\"]" \
+        -s "webOrigins=[\"http://$EXTERNAL_HOST:${RAG_ENTRY_PORT}\",\"http://$EXTERNAL_HOST:3001\",\"http://$EXTERNAL_HOST\",\"https://$EXTERNAL_HOST:${RAG_ENTRY_PORT}\",\"https://$EXTERNAL_HOST:3001\",\"https://$EXTERNAL_HOST\",\"http://localhost:3001\",\"http://localhost\"]"
     uuid=$(client_uuid rag-frontend)
 else
     ok "client rag-frontend 已存在（补齐 redirect/webOrigins）"
     $KCADM update "clients/$uuid" -r "$KC_REALM" \
-        -s "redirectUris=[\"http://$EXTERNAL_HOST:3001/*\",\"http://$EXTERNAL_HOST/*\",\"https://$EXTERNAL_HOST:3001/*\",\"https://$EXTERNAL_HOST/*\",\"http://localhost:3001/*\",\"http://localhost/*\",\"https://localhost:3001/*\",\"https://localhost/*\"]" \
-        -s "webOrigins=[\"http://$EXTERNAL_HOST:3001\",\"http://$EXTERNAL_HOST\",\"https://$EXTERNAL_HOST:3001\",\"https://$EXTERNAL_HOST\",\"http://localhost:3001\",\"http://localhost\"]"
+        -s "redirectUris=[\"http://$EXTERNAL_HOST:${RAG_ENTRY_PORT}/*\",\"http://$EXTERNAL_HOST:3001/*\",\"http://$EXTERNAL_HOST/*\",\"https://$EXTERNAL_HOST:${RAG_ENTRY_PORT}/*\",\"https://$EXTERNAL_HOST:3001/*\",\"https://$EXTERNAL_HOST/*\",\"http://localhost:3001/*\",\"http://localhost/*\",\"https://localhost:3001/*\",\"https://localhost/*\"]" \
+        -s "webOrigins=[\"http://$EXTERNAL_HOST:${RAG_ENTRY_PORT}\",\"http://$EXTERNAL_HOST:3001\",\"http://$EXTERNAL_HOST\",\"https://$EXTERNAL_HOST:${RAG_ENTRY_PORT}\",\"https://$EXTERNAL_HOST:3001\",\"https://$EXTERNAL_HOST\",\"http://localhost:3001\",\"http://localhost\"]"
 fi
 
 # 3. admin-console（public，管理台 SSO）──
