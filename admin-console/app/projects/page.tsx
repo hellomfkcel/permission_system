@@ -447,7 +447,7 @@ export default function ProjectsPage() {
                       <div className="text-xs text-amber-800 bg-amber-50 border border-amber-300 rounded px-2 py-1.5">
                         ⚠️ <b>管理员</b> 将授予该用户对整个项目 <b>全部知识库</b> 的
                         管理/写入/授权权限（创建删除 KB、上传解析文档）。<br />
-                        若只需只读访问，请选择 <b>"只读"</b>。
+                        若只需只读访问，请选择 <b>「只读」</b>。
                       </div>
                     )}
                     {userSearch && filteredUsers.length > 0 && (
